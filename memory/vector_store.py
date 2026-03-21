@@ -1,9 +1,11 @@
 """
-VectorStore — ChromaDB wrapper for per-agent persistent memory.
+VectorStore — ChromaDB wrapper for per-agent persistent memory with temporal support.
 
-Each agent gets its own ChromaDB collection.
-Embeddings use sentence-transformers all-MiniLM-L6-v2 (local, no API key).
-Falls back gracefully if ChromaDB is unavailable.
+Temporal memory (inspired by MiroFish's Zep temporal facts):
+  - Every memory entry has an 'expired' flag (default "False")
+  - When a training run fails, its memories can be marked expired
+  - Recall filters out expired memories — agents won't repeat failed approaches
+  - Expired memories still exist in the DB (for audit/lineage), just hidden from recall
 """
 
 import os
@@ -20,16 +22,13 @@ except ImportError:
 
 
 CHROMA_PERSIST_DIR = os.path.join("experiments", "chroma_db")
-EMBED_MODEL        = "all-MiniLM-L6-v2"   # dim=384, fast, local
+EMBED_MODEL        = "all-MiniLM-L6-v2"
 
 
 class VectorStore:
     """
     Wraps ChromaDB. Each agent gets its own persistent collection.
-
-    Collection naming: agent_{agent_name_sanitized}
-      e.g.  explorer → agent_explorer
-            devil's advocate → agent_devils_advocate
+    Supports temporal expiry of memories from failed runs.
     """
 
     def __init__(self, persist_dir: str = CHROMA_PERSIST_DIR):
@@ -51,7 +50,6 @@ class VectorStore:
 
     @staticmethod
     def _col_name(agent_name: str) -> str:
-        """Sanitize agent name to a valid ChromaDB collection name."""
         return "agent_" + (
             agent_name.lower()
             .replace("'", "")
@@ -90,13 +88,13 @@ class VectorStore:
         meta = {
             "node_id":   node_id,
             "run_id":    run_id,
-            "task":      task[:500],        # ChromaDB metadata has size limits
+            "task":      task[:500],
             "success":   str(success),
+            "expired":   "False",           # temporal: active by default
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             **(metadata or {}),
         }
 
-        # Embed and store the output text
         collection.add(
             ids=[node_id],
             documents=[output],
@@ -104,50 +102,97 @@ class VectorStore:
         )
 
     # ------------------------------------------------------------------ #
-    # Recall relevant memories                                             #
+    # Temporal: expire memories from a failed run                         #
+    # ------------------------------------------------------------------ #
+
+    def expire_run(self, agent_name: str, run_id: str):
+        """
+        Mark all memories from a specific run as expired.
+        Called when a training attempt fails — agents won't repeat that approach.
+        """
+        if not self.available:
+            return
+
+        collection = self._get_collection(agent_name)
+        results    = collection.get(where={"run_id": run_id})
+
+        if not results["ids"]:
+            return
+
+        # Update each entry's metadata to mark as expired
+        updated_meta = []
+        for meta in results["metadatas"]:
+            updated = dict(meta)
+            updated["expired"]    = "True"
+            updated["expired_at"] = datetime.now().isoformat(timespec="seconds")
+            updated_meta.append(updated)
+
+        collection.update(ids=results["ids"], metadatas=updated_meta)
+        print(f"[VectorStore] Expired {len(results['ids'])} memories for agent '{agent_name}' (run: {run_id})")
+
+    def expire_run_all_agents(self, run_id: str, agent_names: list[str]):
+        """Expire memories for this run across all agents."""
+        for name in agent_names:
+            self.expire_run(name, run_id)
+
+    # ------------------------------------------------------------------ #
+    # Recall — filters out expired memories                               #
     # ------------------------------------------------------------------ #
 
     def recall(
         self,
-        agent_name: str,
-        query:      str,
-        top_k:      int = 3,
-        run_id_exclude: Optional[str] = None,
+        agent_name:      str,
+        query:           str,
+        top_k:           int           = 3,
+        run_id_exclude:  Optional[str] = None,
     ) -> list[dict]:
         """
-        Returns top_k most relevant past memories for an agent.
-        Each result: {"output": str, "task": str, "run_id": str, "distance": float}
+        Returns top_k most relevant ACTIVE (non-expired) memories.
         """
         if not self.available:
             return []
 
         collection = self._get_collection(agent_name)
-        count = collection.count()
+        count      = collection.count()
         if count == 0:
             return []
 
-        where = None
+        # Build where filter — exclude expired AND current run
+        conditions = [{"expired": {"$ne": "True"}}]
         if run_id_exclude:
-            where = {"run_id": {"$ne": run_id_exclude}}
+            conditions.append({"run_id": {"$ne": run_id_exclude}})
+
+        where = {"$and": conditions} if len(conditions) > 1 else conditions[0]
+
+        # Count non-expired entries to avoid querying more than available
+        try:
+            active = collection.get(where=where)
+            n_active = len(active["ids"])
+        except Exception:
+            n_active = count
+
+        if n_active == 0:
+            return []
 
         results = collection.query(
             query_texts=[query],
-            n_results=min(top_k, count),
+            n_results=min(top_k, n_active),
             where=where,
             include=["documents", "metadatas", "distances"],
         )
 
         memories = []
-        docs      = results["documents"][0]
-        metas     = results["metadatas"][0]
-        distances = results["distances"][0]
-
-        for doc, meta, dist in zip(docs, metas, distances):
+        for doc, meta, dist in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        ):
             memories.append({
                 "output":   doc,
                 "task":     meta.get("task", ""),
                 "run_id":   meta.get("run_id", ""),
                 "success":  meta.get("success", "True") == "True",
+                "expired":  meta.get("expired", "False") == "True",
                 "distance": round(dist, 4),
             })
 
@@ -161,6 +206,17 @@ class VectorStore:
         if not self.available:
             return 0
         return self._get_collection(agent_name).count()
+
+    def agent_active_memory_size(self, agent_name: str) -> int:
+        """Count only non-expired memories."""
+        if not self.available:
+            return 0
+        try:
+            col     = self._get_collection(agent_name)
+            results = col.get(where={"expired": {"$ne": "True"}})
+            return len(results["ids"])
+        except Exception:
+            return 0
 
     def list_agents(self) -> list[str]:
         if not self.available:

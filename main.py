@@ -24,9 +24,10 @@ from agents import (
     PragmatistAgent, DevilAdvocateAgent, ArchitectAgent, OptimizerAgent,
     StorytellerAgent, CodeWriterAgent,
 )
-from agents.planner_agents import PragmatistAgent as FeatureEngineerAgent  # shares base prompt slot
-from execution.executor    import CodeExecutor
-from memory.agent_memory   import MemorySystem
+from agents.agent_config import AGENT_CONFIGS
+from agents.base         import BaseAgent
+from execution.executor  import CodeExecutor
+from memory.agent_memory import MemorySystem
 from orchestration.orchestrator import Orchestrator
 
 
@@ -84,20 +85,19 @@ AGENT_NAMES = [
 
 def build_agents(llm) -> dict:
     from prompts.planner_prompts import FEATURE_ENGINEER_PROMPT
-    from agents.base import BaseAgent
 
     return {
-        "explorer":         ExplorerAgent(llm),
-        "skeptic":          SkepticAgent(llm),
-        "statistician":     StatisticianAgent(llm),
-        "feature_engineer": BaseAgent("Feature Engineer", FEATURE_ENGINEER_PROMPT, llm),
-        "ethicist":         EthicistAgent(llm),
-        "pragmatist":       PragmatistAgent(llm),
-        "devil_advocate":   DevilAdvocateAgent(llm),
-        "optimizer":        OptimizerAgent(llm),
-        "architect":        ArchitectAgent(llm),
-        "storyteller":      StorytellerAgent(llm),
-        "code_writer":      CodeWriterAgent(llm),
+        "explorer":         ExplorerAgent(llm,       config=AGENT_CONFIGS["explorer"]),
+        "skeptic":          SkepticAgent(llm,        config=AGENT_CONFIGS["skeptic"]),
+        "statistician":     StatisticianAgent(llm,   config=AGENT_CONFIGS["statistician"]),
+        "feature_engineer": BaseAgent("Feature Engineer", FEATURE_ENGINEER_PROMPT, llm, config=AGENT_CONFIGS["feature_engineer"]),
+        "ethicist":         EthicistAgent(llm,       config=AGENT_CONFIGS["ethicist"]),
+        "pragmatist":       PragmatistAgent(llm,     config=AGENT_CONFIGS["pragmatist"]),
+        "devil_advocate":   DevilAdvocateAgent(llm,  config=AGENT_CONFIGS["devil_advocate"]),
+        "optimizer":        OptimizerAgent(llm,      config=AGENT_CONFIGS["optimizer"]),
+        "architect":        ArchitectAgent(llm,      config=AGENT_CONFIGS["architect"]),
+        "storyteller":      StorytellerAgent(llm,    config=AGENT_CONFIGS["storyteller"]),
+        "code_writer":      CodeWriterAgent(llm,     config=AGENT_CONFIGS["code_writer"]),
     }
 
 

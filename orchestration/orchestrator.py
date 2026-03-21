@@ -208,12 +208,18 @@ class Orchestrator:
         # Phase 2: Training retry loop
         last_result:     ExecutionResult = None
         last_code_node:  str             = None
+        last_run_id:     str             = self.run_id   # tracks the run_id of the last attempt
 
         for attempt in range(1, max_retries + 1):
             print(f"\n🔁 Training attempt {attempt}/{max_retries}")
 
+            # Each retry gets a fresh run_id so memories are scoped correctly
+            if attempt > 1:
+                self.run_id = str(uuid.uuid4())[:12]
+                print(f"   New run_id for attempt {attempt}: {self.run_id}")
+
             if attempt > 1 and last_result:
-                self._handle_failure(last_result, attempt, last_code_node)
+                self._handle_failure(last_result, attempt, last_run_id, last_code_node)
 
             # Generate code
             print(f"\n💻 CodeWriter generating script (attempt {attempt})...")
@@ -246,8 +252,9 @@ class Orchestrator:
             print(f"[EXECUTOR] Script saved: {script_path}")
 
             # Execute
-            result      = self.executor.run(code, attempt=attempt)
-            last_result = result
+            result       = self.executor.run(code, attempt=attempt)
+            last_result  = result
+            last_run_id  = self.run_id   # snapshot before potential run_id change on next iteration
             self.context.add_result(result.stdout, result.metrics, result.success, attempt=attempt)
 
             print(f"\n{'✅' if result.success else '❌'} {result.short_summary()}")
@@ -278,13 +285,17 @@ class Orchestrator:
 
         return last_result
 
-    def _handle_failure(self, result: ExecutionResult, attempt: int, failed_code_node: str = None):
+    def _handle_failure(self, result: ExecutionResult, attempt: int, failed_run_id: str, failed_code_node: str = None):
         failure_summary = (
             f"Training attempt {attempt - 1} FAILED.\n"
             f"Error type : {result.error_type}\n"
             f"Error msg  : {result.error_msg}\n"
             f"Stderr     : {result.stderr[:500]}"
         )
+
+        # Expire all memories from the failed run — agents won't repeat that approach
+        if self.memory:
+            self.memory.expire_run(failed_run_id)
 
         da_node = str(uuid.uuid4())[:12]
         print("\n😈 Devil's Advocate re-evaluating after failure...")

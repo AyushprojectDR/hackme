@@ -1,20 +1,30 @@
 from langchain.schema import HumanMessage, SystemMessage
+from agents.agent_config import AgentConfig
 
 
 class BaseAgent:
     """
     Base class for all agents.
 
+    Behavioral config (AgentConfig) is injected into the system prompt
+    so the LLM knows HOW to behave, not just what to do.
+
     If an AgentMemory is attached, the agent will:
-      - recall relevant past memories before running (injected into context)
+      - recall relevant past memories before running (insight_forge or top-K)
       - store its output after running
     """
 
-    def __init__(self, name: str, system_prompt: str, llm):
+    def __init__(self, name: str, system_prompt: str, llm, config: AgentConfig = None):
         self.name          = name
-        self.system_prompt = system_prompt
+        self._system_prompt = system_prompt
         self.llm           = llm
+        self.config        = config or AgentConfig()
         self.memory        = None   # set by Orchestrator via attach_memory()
+
+    @property
+    def system_prompt(self) -> str:
+        """System prompt + behavioral instructions appended."""
+        return self._system_prompt + self.config.behavioral_instructions()
 
     def attach_memory(self, agent_memory):
         self.memory = agent_memory
@@ -28,16 +38,19 @@ class BaseAgent:
         role:     str  = "analysis",
         success:  bool = True,
     ) -> str:
-        # 1. Recall relevant memories from past runs
+        # 1. Recall relevant memories (insight_forge if configured, else top-K)
         memory_block = ""
         if self.memory and run_id:
-            _, memory_block = self.memory.recall(task=task, run_id=run_id)
+            if self.config.use_insight_forge:
+                _, memory_block = self.memory.insight_forge_recall(
+                    task=task, run_id=run_id, llm=self.llm
+                )
+            else:
+                _, memory_block = self.memory.recall(task=task, run_id=run_id)
 
         # 2. Build full context
         context_block = context.strip() if context.strip() else "(No analysis yet — you are going first.)"
-        full_context  = (
-            f"{memory_block}\n\n{context_block}" if memory_block else context_block
-        )
+        full_context  = f"{memory_block}\n\n{context_block}" if memory_block else context_block
 
         messages = [
             SystemMessage(content=self.system_prompt),
