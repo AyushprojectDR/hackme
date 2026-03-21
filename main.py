@@ -2,50 +2,53 @@
 Multi-Agent Data Science Team
 ==============================
 Usage:
-    python main.py --dataset data.csv --provider claude
-    python main.py --dataset data.csv --provider local --base-url http://localhost:8000/v1 --model mistral-7b
-    python main.py --dataset data.csv --provider openai --model gpt-4o-mini
+    # Advisory only (no code execution)
     python main.py --dataset data.csv --provider claude --mode manual
+    python main.py --dataset data.csv --provider claude --mode auto
+
+    # Full training loop: analyze → generate code → execute → retry on failure
+    python main.py --dataset data.csv --provider claude --mode train
+    python main.py --dataset data.csv --provider claude --mode train --target SalePrice --retries 4
+
+    # Skip long-term memory (useful for first run / testing)
+    python main.py --dataset data.csv --provider claude --mode train --no-memory
 """
 
 import argparse
 import os
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor
 
-from llm_backends import get_llm
-from agents import Agent
-from orchestrator import Orchestrator
-from prompts import (
-    EXPLORER_PROMPT, SKEPTIC_PROMPT, PRAGMATIST_PROMPT, STORYTELLER_PROMPT,
-    STATISTICIAN_PROMPT, FEATURE_ENGINEER_PROMPT, DEVIL_ADVOCATE_PROMPT,
-    OPTIMIZER_PROMPT, ETHICIST_PROMPT, ARCHITECT_PROMPT,
+from backends.llm_backends import get_llm
+from agents import (
+    ExplorerAgent, SkepticAgent, StatisticianAgent, EthicistAgent,
+    PragmatistAgent, DevilAdvocateAgent, ArchitectAgent, OptimizerAgent,
+    StorytellerAgent, CodeWriterAgent,
 )
+from agents.planner_agents import PragmatistAgent as FeatureEngineerAgent  # shares base prompt slot
+from execution.executor    import CodeExecutor
+from memory.agent_memory   import MemorySystem
+from orchestration.orchestrator import Orchestrator
+
+
+EXPERIMENT_DIR = "experiments"
 
 
 # ------------------------------------------------------------------ #
-# Dataset summary builder                                             #
+# Dataset summary                                                      #
 # ------------------------------------------------------------------ #
 
 def build_dataset_summary(df: pd.DataFrame) -> str:
-    """Build a compact dataset summary to feed into the agents."""
     missing = df.isnull().sum()
     missing_summary = missing[missing > 0].to_string() if missing.any() else "None"
 
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
+    cat_cols     = df.select_dtypes(exclude="number").columns.tolist()
 
     corr_summary = ""
     if len(numeric_cols) > 1:
-        corr = df[numeric_cols].corr()
-        # Find top correlated pairs (excluding self)
-        pairs = (
-            corr.abs()
-            .unstack()
-            .sort_values(ascending=False)
-            .drop_duplicates()
-        )
-        top_pairs = pairs[(pairs < 1.0)].head(5)
+        corr      = df[numeric_cols].corr()
+        pairs     = corr.abs().unstack().sort_values(ascending=False).drop_duplicates()
+        top_pairs = pairs[pairs < 1.0].head(5)
         corr_summary = top_pairs.to_string()
 
     return f"""
@@ -70,121 +73,56 @@ Top Correlations:
 
 
 # ------------------------------------------------------------------ #
-# Manual pipeline (fixed step order)                                  #
+# Agent factory                                                        #
 # ------------------------------------------------------------------ #
 
-def run_manual(orchestrator: Orchestrator, dataset_summary: str):
-    """
-    Full pipeline:
-      Round 1 (parallel): Explorer + Skeptic + Statistician
-      Round 2 (parallel): Feature Engineer + Ethicist
-      Round 3           : Pragmatist
-      Round 4           : Devil's Advocate
-      Round 5           : Optimizer
-      Round 6           : Storyteller
-    """
-    print("\n🚀 Starting analysis (manual mode)\n")
-    orchestrator.log = f"[DATASET CONTEXT]\n{dataset_summary}"
+AGENT_NAMES = [
+    "explorer", "skeptic", "statistician", "feature_engineer",
+    "ethicist", "pragmatist", "devil_advocate", "optimizer",
+    "architect", "storyteller", "code_writer",
+]
 
-    # Round 1 — Independent initial analysis (all 3 in parallel)
-    print("\n⚡ Round 1: Explorer + Skeptic + Statistician (parallel)...")
-    with ThreadPoolExecutor() as executor:
-        futures = {
-            "explorer": executor.submit(
-                orchestrator.step, "explorer",
-                "Perform a thorough EDA. Find patterns, correlations, key features. Suggest what might be the target variable."
-            ),
-            "skeptic": executor.submit(
-                orchestrator.step, "skeptic",
-                "Inspect data quality: missing values, outliers, duplicates, leakage risks, suspicious patterns."
-            ),
-            "statistician": executor.submit(
-                orchestrator.step, "statistician",
-                "Analyze distributions, check for multicollinearity, test statistical significance of correlations, flag skewed features."
-            ),
-        }
-        for f in futures.values():
-            f.result()
+def build_agents(llm) -> dict:
+    from prompts.planner_prompts import FEATURE_ENGINEER_PROMPT
+    from agents.base import BaseAgent
 
-    # Round 2 — Feature ideas + Ethics check (parallel, both read Round 1 output)
-    print("\n⚡ Round 2: Feature Engineer + Ethicist (parallel)...")
-    with ThreadPoolExecutor() as executor:
-        futures = {
-            "feature_engineer": executor.submit(
-                orchestrator.step, "feature_engineer",
-                "Based on the EDA and statistical findings, suggest new features, encoding strategies, and transformations. Flag redundant features."
-            ),
-            "ethicist": executor.submit(
-                orchestrator.step, "ethicist",
-                "Identify sensitive attributes, potential bias in the data, fairness concerns, and ethical risks of deploying this model."
-            ),
-        }
-        for f in futures.values():
-            f.result()
-
-    # Round 3 — Pragmatist builds the plan from all findings
-    print("\n📋 Round 3: Pragmatist building action plan...")
-    orchestrator.step(
-        "pragmatist",
-        "Given all findings so far, create a clear step-by-step modeling plan. Pick top 2-3 models, specify features to use/drop, and define the evaluation metric."
-    )
-
-    # Round 4 — Devil's Advocate challenges the plan
-    print("\n😈 Round 4: Devil's Advocate stress-testing the plan...")
-    orchestrator.step(
-        "devil_advocate",
-        "Challenge the Pragmatist's plan. Is the problem framed correctly? Are we picking the right model? What critical assumption is wrong? Suggest an alternative approach."
-    )
-
-    # Round 5 — Optimizer squeezes performance
-    print("\n🔧 Round 5: Optimizer tuning strategy...")
-    orchestrator.step(
-        "optimizer",
-        "Given the chosen models and Devil's Advocate feedback, recommend a concrete hyperparameter tuning and cross-validation strategy. Suggest any ensembling opportunities."
-    )
-
-    # Round 6 — Architect designs the deployment
-    print("\n🏗️  Round 6: Architect designing deployment...")
-    orchestrator.step(
-        "architect",
-        "Given the chosen model and optimization strategy, design the deployment architecture. Address: serving infrastructure, inference latency, training-serving skew, monitoring, and any bottlenecks."
-    )
-
-    # Round 7 — Storyteller wraps up for judges
-    print("\n📖 Round 7: Storyteller writing the narrative...")
-    orchestrator.step(
-        "storyteller",
-        "Synthesize everything into a compelling narrative for judges. What is the dataset about, what did we find, what model are we using and why, what ethical concerns exist, how will it be deployed, and what results can we expect?"
-    )
+    return {
+        "explorer":         ExplorerAgent(llm),
+        "skeptic":          SkepticAgent(llm),
+        "statistician":     StatisticianAgent(llm),
+        "feature_engineer": BaseAgent("Feature Engineer", FEATURE_ENGINEER_PROMPT, llm),
+        "ethicist":         EthicistAgent(llm),
+        "pragmatist":       PragmatistAgent(llm),
+        "devil_advocate":   DevilAdvocateAgent(llm),
+        "optimizer":        OptimizerAgent(llm),
+        "architect":        ArchitectAgent(llm),
+        "storyteller":      StorytellerAgent(llm),
+        "code_writer":      CodeWriterAgent(llm),
+    }
 
 
 # ------------------------------------------------------------------ #
-# Auto pipeline (LLM decides steps)                                   #
-# ------------------------------------------------------------------ #
-
-def run_auto(orchestrator: Orchestrator, dataset_summary: str):
-    print("\n🤖 Starting analysis (auto mode — orchestrator decides)\n")
-    orchestrator.run_auto(initial_context=dataset_summary)
-
-
-# ------------------------------------------------------------------ #
-# Entry point                                                         #
+# Entry point                                                          #
 # ------------------------------------------------------------------ #
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-Agent Data Science Team")
-    parser.add_argument("--dataset",   required=True,       help="Path to CSV dataset")
-    parser.add_argument("--provider",  default="claude",    help="LLM provider: claude | openai | local")
-    parser.add_argument("--model",     default=None,        help="Model name override")
-    parser.add_argument("--base-url",  default=None,        help="Base URL for local vLLM server")
-    parser.add_argument("--mode",      default="manual",    help="Pipeline mode: manual | auto")
-    parser.add_argument("--save-log",  action="store_true", help="Save analysis log to file")
+    parser.add_argument("--dataset",    required=True,        help="Path to CSV dataset")
+    parser.add_argument("--provider",   default="claude",     help="LLM provider: claude | openai | local")
+    parser.add_argument("--model",      default=None,         help="Model name override")
+    parser.add_argument("--base-url",   default=None,         help="Base URL for local vLLM server")
+    parser.add_argument("--mode",       default="manual",     help="Pipeline mode: manual | auto | train")
+    parser.add_argument("--target",     default=None,         help="Target column name (train mode)")
+    parser.add_argument("--retries",    type=int, default=4,  help="Max training retries (train mode)")
+    parser.add_argument("--no-memory",  action="store_true",  help="Disable ChromaDB long-term memory")
+    parser.add_argument("--save-log",   action="store_true",  help="Save context log to JSON")
     args = parser.parse_args()
 
-    # Load dataset
     if not os.path.exists(args.dataset):
         print(f"❌ Dataset not found: {args.dataset}")
         return
+
+    os.makedirs(EXPERIMENT_DIR, exist_ok=True)
 
     print(f"📂 Loading dataset: {args.dataset}")
     df = pd.read_csv(args.dataset)
@@ -193,45 +131,57 @@ def main():
     print(f"\n🔧 Provider : {args.provider}")
     print(f"🔧 Model    : {args.model or 'default'}")
     print(f"🔧 Mode     : {args.mode}")
+    print(f"🔧 Memory   : {'disabled' if args.no_memory else 'ChromaDB (experiments/chroma_db)'}")
 
-    # Initialize LLM
     llm_kwargs = {}
     if args.base_url:
         llm_kwargs["base_url"] = args.base_url
 
-    llm = get_llm(args.provider, model=args.model, **llm_kwargs)
+    llm    = get_llm(args.provider, model=args.model, **llm_kwargs)
+    agents = build_agents(llm)
 
-    # Build agents
-    agents = {
-        "explorer":         Agent("Explorer",         EXPLORER_PROMPT,         llm),
-        "skeptic":          Agent("Skeptic",          SKEPTIC_PROMPT,          llm),
-        "statistician":     Agent("Statistician",     STATISTICIAN_PROMPT,     llm),
-        "feature_engineer": Agent("Feature Engineer", FEATURE_ENGINEER_PROMPT, llm),
-        "pragmatist":       Agent("Pragmatist",       PRAGMATIST_PROMPT,       llm),
-        "devil_advocate":   Agent("Devil's Advocate", DEVIL_ADVOCATE_PROMPT,   llm),
-        "optimizer":        Agent("Optimizer",        OPTIMIZER_PROMPT,        llm),
-        "ethicist":         Agent("Ethicist",         ETHICIST_PROMPT,         llm),
-        "architect":        Agent("Architect",        ARCHITECT_PROMPT,        llm),
-        "storyteller":      Agent("Storyteller",      STORYTELLER_PROMPT,      llm),
-    }
+    # Memory system (per-agent ChromaDB + SQLite graph)
+    memory_system = None
+    if not args.no_memory:
+        memory_system = MemorySystem(
+            agent_names=AGENT_NAMES,
+            persist_dir=os.path.join(EXPERIMENT_DIR, "chroma_db"),
+            graph_db=os.path.join(EXPERIMENT_DIR, "graph.db"),
+        )
 
-    # Build orchestrator (pass llm only for auto mode)
     orch_llm = llm if args.mode == "auto" else None
-    orchestrator = Orchestrator(agents=agents, llm=orch_llm)
+    executor = CodeExecutor(work_dir=EXPERIMENT_DIR) if args.mode == "train" else None
 
-    # Run
+    orchestrator = Orchestrator(
+        agents=agents,
+        llm=orch_llm,
+        executor=executor,
+        memory_system=memory_system,
+    )
+
     if args.mode == "manual":
-        run_manual(orchestrator, dataset_summary)
+        orchestrator.run_manual(dataset_summary)
+
     elif args.mode == "auto":
-        run_auto(orchestrator, dataset_summary)
+        orchestrator.run_auto(dataset_summary)
+
+    elif args.mode == "train":
+        orchestrator.run_training_loop(
+            dataset_summary=dataset_summary,
+            dataset_path=os.path.abspath(args.dataset),
+            target_col=args.target,
+            max_retries=args.retries,
+            experiment_dir=EXPERIMENT_DIR,
+        )
+
     else:
-        print(f"❌ Unknown mode '{args.mode}'. Use 'manual' or 'auto'.")
+        print(f"❌ Unknown mode '{args.mode}'. Use: manual | auto | train")
         return
 
-    # Save log if requested
     if args.save_log:
-        orchestrator.save_log("analysis_log.txt")
+        orchestrator.save_log()
 
+    orchestrator.print_summary()
     print("\n✅ Done!")
 
 

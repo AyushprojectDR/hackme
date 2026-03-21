@@ -2,6 +2,15 @@ langchain
 langchain-anthropic
 langchain-openai
 langchain-community
+
+# Vector DB — per-agent long-term memory
+chromadb
+sentence-transformers
+
+# ML training
 pandas
 scikit-learn
+xgboost
+joblib
+
 python-dotenv
