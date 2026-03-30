@@ -1,3 +1,4 @@
+import os
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 from langchain_community.llms import VLLMOpenAI
@@ -13,7 +14,12 @@ def get_llm(provider: str, model: str = None, base_url: str = None, **kwargs):
         local  : Local vLLM server (requires base_url or VLLM_URL env var)
     """
     if provider == "claude":
-        return ChatAnthropic(model=model or "claude-3-5-haiku-20241022", **kwargs)
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        return ChatAnthropic(
+            model=model or "claude-3-5-haiku-20241022",
+            api_key=api_key,
+            **kwargs
+        )
 
     if provider == "openai":
         return ChatOpenAI(model=model or "gpt-4o-mini", **kwargs)

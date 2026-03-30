@@ -25,6 +25,9 @@ Usage:
 
 import argparse
 import os
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 from backends.llm_backends  import get_llm
 from backends.fallback       import build_fallback_llm

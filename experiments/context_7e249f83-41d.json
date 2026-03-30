@@ -1,0 +1,20 @@
+[
+  {
+    "agent": "system",
+    "role": "dataset_context",
+    "content": "DATASET PATH  : /Users/ayushkushwaha/Desktop/hackathon/test_data.csv\nTYPE          : Single file\nTOTAL FILES   : 1\nDATA TYPES    : tabular\nMIXED DATASET : No\n\n\u2500\u2500 TABULAR FILES (1) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  \ud83d\udcc4 .  (0.4 KB)  rows=15  cols=5\n       columns : [age, income, credit_score, loan_amount, loan_approved]\n       preview :\n         age  income  credit_score  loan_amount  loan_approved\n         0   25   35000           650         5000              0\n         1   35   65000           720        15000              1\n         2   28   45000           680         8000              0\n",
+    "pinned": true,
+    "id": "28818ebe",
+    "timestamp": "2026-03-30T14:02:30",
+    "metadata": {}
+  },
+  {
+    "agent": "builder_agent",
+    "role": "meta",
+    "content": "DATASET ANALYSIS STRATEGY:\nStandard tabular ML pipeline.",
+    "pinned": true,
+    "id": "4ee98acf",
+    "timestamp": "2026-03-30T14:02:30",
+    "metadata": {}
+  }
+]
