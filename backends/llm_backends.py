@@ -22,12 +22,19 @@ def get_llm(provider: str, model: str = None, base_url: str = None, **kwargs):
         )
 
     if provider == "openai":
-        return ChatOpenAI(model=model or "gpt-4o-mini", **kwargs)
+        api_key = os.getenv("OPENAI_API_KEY")
+        return ChatOpenAI(
+            model=model or "gpt-4o-mini",
+            api_key=api_key,
+            **kwargs
+        )
 
     if provider == "local":
+        vllm_url = base_url or os.getenv("VLLM_URL") or "http://localhost:8000/v1"
+        vllm_model = model or os.getenv("VLLM_MODEL") or "mistral-7b-instruct"
         return VLLMOpenAI(
-            openai_api_base=base_url or "http://localhost:8000/v1",
-            model_name=model or "mistral-7b-instruct",
+            openai_api_base=vllm_url,
+            model_name=vllm_model,
             openai_api_key="EMPTY",
             **kwargs,
         )
