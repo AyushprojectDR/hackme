@@ -1,0 +1,8 @@
+# Uses ANTHROPIC_API_KEY from .env
+python main.py --dataset data.csv --provider claude --mode phases
+
+# Uses VLLM_URL + VLLM_MODEL from .env
+python main.py --dataset data.csv --provider local --mode phases
+
+# Or override with CLI args (takes precedence)
+python main.py --dataset data.csv --provider local --base-url http://custom:8000/v1 --model llama2
