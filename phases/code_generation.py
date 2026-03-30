@@ -20,9 +20,10 @@ Agents (optional): devil_advocate, pragmatist (for failure recovery)
 import os
 import uuid
 
-from memory.context_manager import ROLE_PLAN
-from memory.graph_store      import INFORMED_BY, RETRY_OF, FAILURE_LED_TO
-from execution.context_guard import format_execution_result
+from memory.context_manager  import ROLE_PLAN
+from memory.graph_store       import INFORMED_BY, RETRY_OF, FAILURE_LED_TO
+from execution.context_guard  import format_execution_result
+from agents.diagnostic_agent  import DiagnosticAgent
 from .base import BasePhase, PhaseResult
 
 
@@ -33,6 +34,10 @@ class CodeGenerationPhase(BasePhase):
 
     name = "code_generation"
     REQUIRED_AGENTS = ["code_writer"]
+
+    def __init__(self, orchestrator):
+        super().__init__(orchestrator)
+        self.diagnostic = DiagnosticAgent(orchestrator.llm)
 
     def _run(
         self,
@@ -147,6 +152,7 @@ class CodeGenerationPhase(BasePhase):
     def _handle_failure(self, result, attempt: int, failed_run_id: str, failed_code_node: str = None):
         orch = self.orch
 
+        raw_error = f"{result.stderr}\n{result.stdout}"
         failure_summary = (
             f"Training attempt {attempt - 1} FAILED.\n"
             f"Error type : {result.error_type}\n"
@@ -158,17 +164,61 @@ class CodeGenerationPhase(BasePhase):
         if orch.memory:
             orch.memory.expire_run(failed_run_id)
 
-        # Devil's Advocate re-evaluates the failure (optional)
+        # ── DiagnosticAgent: root cause BEFORE retry ──────────────────────
+        # Karpathy principle: understand WHY it failed, then fix precisely.
+        # Instead of blindly injecting raw errors, we first diagnose the cause.
+        print("\n🔬 [CodeGeneration] DiagnosticAgent analyzing root cause...")
+        last_code = ""
+        ctx_str = orch.context.get_context_string()
+
+        # Grab the last generated code from disk if possible
+        last_script = os.path.join(
+            getattr(orch.executor, "work_dir", "experiments"),
+            f"train_attempt_{attempt - 1}.py"
+        )
+        if os.path.exists(last_script):
+            with open(last_script) as f:
+                last_code = f.read()
+
+        diagnosis = self.diagnostic.analyze(
+            error_msg=raw_error,
+            code=last_code,
+            context=ctx_str[-600:],
+        )
+        diagnosis_block = diagnosis.format_for_retry()
+        print(f"   Root cause    : {diagnosis.root_cause}")
+        print(f"   Failure class : {diagnosis.failure_class}")
+        print(f"   Redesign?     : {diagnosis.redesign_needed}")
+
+        # Inject diagnostic into context so all agents see it
+        orch.context.add("diagnostic_agent", ROLE_PLAN, diagnosis_block)
+
+        # Adapt agent personalities based on failure count
+        failure_metrics = {
+            "training_failures": attempt - 1,
+            **getattr(orch, "_data_metrics", {}),
+        }
+        orch._adapt_agent_personalities(failure_metrics)
+
+        # ── Devil's Advocate re-evaluates using diagnostic ─────────────────
         if "devil_advocate" in orch.agents:
             da_node = str(uuid.uuid4())[:12]
             print("\n😈 [CodeGeneration] Devil's Advocate analyzing failure...")
+            da_task = (
+                f"{failure_summary}\n\n"
+                f"{diagnosis_block}\n\n"
+                + (
+                    "The diagnostic says a FULL REDESIGN is needed. "
+                    "Propose a fundamentally different approach — different model class, "
+                    "different problem framing, or different data strategy."
+                    if diagnosis.redesign_needed else
+                    "The diagnostic says only a CODE FIX is needed — no full redesign. "
+                    "Challenge whether that's really true. Are there deeper assumptions wrong?"
+                )
+            )
             da_response = orch.agents["devil_advocate"].run(
-                context=orch.context.get_context_string(),
-                task=(
-                    f"{failure_summary}\n\n"
-                    "What went wrong? What fundamental assumption was violated? "
-                    "Propose a completely different modeling approach."
-                ),
+                context=ctx_str,
+                task=da_task,
                 node_id=da_node,
                 run_id=orch.run_id,
                 role=ROLE_PLAN,
@@ -179,13 +229,14 @@ class CodeGenerationPhase(BasePhase):
                 orch.memory.graph_store.add_edge(failed_code_node, da_node, FAILURE_LED_TO)
             orch._last_node_id = da_node
 
-        # Pragmatist revises the plan (optional)
-        if "pragmatist" in orch.agents:
+        # ── Pragmatist revises (if redesign needed or on attempt >= 3) ────
+        if "pragmatist" in orch.agents and (diagnosis.redesign_needed or attempt >= 3):
             print("\n📋 [CodeGeneration] Pragmatist revising plan...")
             orch.step(
                 "pragmatist",
-                f"{failure_summary}\n\nRevise the modeling plan. Be concrete about exactly what "
-                "to change. Specify a different model, different preprocessing, or different "
-                "approach entirely.",
+                f"{failure_summary}\n\n"
+                f"{diagnosis_block}\n\n"
+                "Revise the modeling plan based on the diagnostic. Be concrete about "
+                "exactly what to change — model type, preprocessing, or approach.",
                 ROLE_PLAN,
             )

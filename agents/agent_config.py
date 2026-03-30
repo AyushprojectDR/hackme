@@ -9,6 +9,12 @@ Fields:
   stance          : supportive | opposing | neutral | observer
   sentiment_bias  : -1.0–1.0  — negative = critical, positive = constructive
   use_insight_forge: whether this agent uses multi-query recall (more expensive)
+
+Adaptive personality (Karpathy-inspired):
+  adapt(metrics) adjusts config dynamically based on run state:
+  - High data quality → reduce Skeptic's criticism
+  - Repeated training failures → increase Devil's Advocate contrarianism
+  - Small dataset → reduce Optimizer verbosity
 """
 
 from dataclasses import dataclass, field
@@ -48,6 +54,47 @@ class AgentConfig:
             lines.append("- Be skeptical and critical. Assume things will go wrong unless proven otherwise.")
 
         return "\n".join(lines)
+
+    def adapt(self, metrics: dict) -> "AgentConfig":
+        """
+        Return a NEW AgentConfig adjusted for current run conditions.
+
+        Inspired by Karpathy's adaptive systems principle:
+        'Parameters should respond to the state of the world, not be hardcoded.'
+
+        metrics keys (all optional):
+          data_quality_score : float 0-1 (from DataProfiler)
+          training_failures  : int   how many training attempts have failed
+          n_rows             : int   dataset size
+          class_imbalance    : float 0-1 imbalance severity
+        """
+        import copy
+        cfg = copy.copy(self)
+
+        quality   = metrics.get("data_quality_score", None)
+        failures  = metrics.get("training_failures",  0)
+        n_rows    = metrics.get("n_rows",             None)
+        imbalance = metrics.get("class_imbalance",    None)
+
+        # High data quality → Skeptic can relax a little
+        if quality is not None and quality > 0.85 and cfg.stance == "opposing":
+            cfg.sentiment_bias = max(cfg.sentiment_bias + 0.2, -0.3)
+            cfg.activity_level = max(cfg.activity_level - 0.1, 0.4)
+
+        # Repeated failures → become more aggressive/contrarian
+        if failures >= 2 and cfg.stance in ("opposing", "neutral"):
+            cfg.sentiment_bias = max(cfg.sentiment_bias - 0.2 * failures, -1.0)
+            cfg.activity_level = min(cfg.activity_level + 0.1, 1.0)
+
+        # Small dataset → optimizer should skip heavy CV advice
+        if n_rows is not None and n_rows < 300:
+            cfg.activity_level = min(cfg.activity_level, 0.5)
+
+        # High imbalance → supportive agents should flag it more strongly
+        if imbalance is not None and imbalance > 0.4 and cfg.stance == "supportive":
+            cfg.sentiment_bias = max(cfg.sentiment_bias - 0.15, -0.3)
+
+        return cfg
 
 
 # ------------------------------------------------------------------ #

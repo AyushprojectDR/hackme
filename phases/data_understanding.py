@@ -27,11 +27,17 @@ Stage 3 — Ethicist (optional, with retry)
 
 from memory.context_manager import ROLE_ANALYSIS, ROLE_META
 from agents.installer_agent import LibraryInstallerAgent
+from analysis.data_profiler import DataProfiler
 from .base import BasePhase, PhaseResult
 
 
 MAX_BUILDER_RETRIES = 2   # how many times to retry the whole BuilderAgent.run()
 MAX_AGENT_RETRIES   = 2   # how many times to retry a single agent step
+
+# Early stopping thresholds (Karpathy: skip what adds no value)
+SKIP_SKEPTIC_QUALITY_THRESHOLD   = 0.92   # data is very clean → skeptic does quick pass
+SKIP_ETHICIST_QUALITY_THRESHOLD  = 0.95   # extremely clean data → ethicist optional
+FOCUS_STATISTICIAN_CORR_PAIRS    = 2      # if > N high-corr pairs → statistician focuses there
 
 
 class DataUnderstandingPhase(BasePhase):
@@ -42,11 +48,14 @@ class DataUnderstandingPhase(BasePhase):
     def __init__(self, orchestrator):
         super().__init__(orchestrator)
         self.installer = LibraryInstallerAgent()
+        self.profiler  = DataProfiler()
 
     def _run(
         self,
         dataset_summary: str = "",
         dataset_profile  = None,   # phases.discovery.DatasetProfile
+        dataset_path:    str = "",
+        target_col:      str = None,
         **kwargs,
     ) -> PhaseResult:
         orch = self.orch
@@ -54,8 +63,27 @@ class DataUnderstandingPhase(BasePhase):
         # ── Pin dataset summary + task goal ──────────────────────────────
         if dataset_summary:
             orch.context.add_dataset_context(dataset_summary)
-        # Pin the task/competition goal as a separate always-visible entry
         orch._pin_task_context()
+
+        # ── Pre-LLM data profile (no inference cost) ─────────────────────
+        # Inspired by Karpathy's data-centric principle: profile first, route second.
+        data_metrics = None
+        if dataset_path:
+            data_metrics = self.profiler.profile(dataset_path, target_col)
+
+        if data_metrics:
+            print(f"\n📊 [DataUnderstanding] Pre-LLM profile complete (quality={data_metrics.data_quality_score:.2f})")
+            orch.context.add(
+                "data_profiler", ROLE_META,
+                data_metrics.summary_text,
+                pinned=True,
+            )
+            # Push adaptive metrics to orchestrator for personality adjustment
+            orch._data_metrics = {
+                "data_quality_score": data_metrics.data_quality_score,
+                "n_rows":             data_metrics.n_rows,
+                "class_imbalance":    data_metrics.class_imbalance,
+            }
 
         # ── Stage 0: Builder Agent ────────────────────────────────────────
         build_plan = None
@@ -77,37 +105,77 @@ class DataUnderstandingPhase(BasePhase):
         # ── Stage 1: Core EDA agents ──────────────────────────────────────
         print("\n⚡ [DataUnderstanding] Core EDA agents starting...")
 
-        # Pull task description from orchestrator so agents can align to the goal
         task_desc = getattr(orch, "task_description", "").strip()
         goal_suffix = (
             f"\n\nUSER GOAL / COMPETITION CONTEXT:\n{task_desc}\n"
-            "Keep this goal in mind throughout your analysis — flag features, "
-            "patterns, and data issues that are most relevant to achieving it."
+            "Keep this goal in mind — flag features, patterns, and data issues "
+            "most relevant to achieving it."
         ) if task_desc else ""
+
+        # Build routing hints from data profile
+        routing     = data_metrics.routing if data_metrics else {}
+        profile_ctx = f"\n\n{data_metrics.summary_text}" if data_metrics else ""
+
+        # Explorer — always runs; guide focus based on profile
+        explorer_focus = ""
+        if routing.get("explorer") == "focus_correlations":
+            explorer_focus = "\nFOCUS: High-correlation pairs were detected — prioritize multicollinearity analysis."
+        elif routing.get("explorer") == "focus_temporal":
+            explorer_focus = "\nFOCUS: Time-series columns detected — prioritize temporal patterns and lag relationships."
 
         self._step_with_retry(
             "explorer",
             "Perform a thorough exploratory data analysis. Identify the most likely "
             "target variable, key predictive features, important patterns, and noteworthy "
             "correlations. If this is a multi-file or non-tabular dataset, describe each "
-            "component and how they relate to each other." + goal_suffix,
+            "component and how they relate to each other."
+            + profile_ctx + explorer_focus + goal_suffix,
             ROLE_ANALYSIS,
         )
-        self._step_with_retry(
-            "skeptic",
-            "Inspect data quality: missing values, outliers, duplicate rows, class "
-            "imbalance, and any potential data leakage between features and target. "
-            "If multiple file types are present, flag format inconsistencies." + (
-                f"\n\nGiven the goal: {task_desc} — flag any data quality issues that "
-                "would specifically hurt performance on that objective." if task_desc else ""
-            ),
-            ROLE_ANALYSIS,
-        )
+
+        # Skeptic — quick pass if data is very clean (early stopping)
+        skeptic_mode = routing.get("skeptic", "normal")
+        if data_metrics and data_metrics.data_quality_score > SKIP_SKEPTIC_QUALITY_THRESHOLD:
+            print(f"\n⚡ [DataUnderstanding] Data quality={data_metrics.data_quality_score:.2f} → Skeptic on QUICK pass")
+            skeptic_task = (
+                "Data quality pre-scan shows this dataset is very clean "
+                f"(quality score {data_metrics.data_quality_score:.2f}/1.0). "
+                "Do a QUICK verification pass: confirm the pre-scan results, "
+                "flag anything the automated scan may have missed, and sign off "
+                "if data is indeed clean enough to proceed."
+            )
+        else:
+            focus_note = ""
+            if skeptic_mode == "prioritize":
+                focus_note = "\nPRIORITY: High missing value or outlier ratio detected — focus there first."
+            skeptic_task = (
+                "Inspect data quality: missing values, outliers, duplicate rows, class "
+                "imbalance, and any potential data leakage between features and target. "
+                "If multiple file types are present, flag format inconsistencies."
+                + focus_note
+                + profile_ctx
+                + (f"\n\nGiven the goal: {task_desc} — flag issues that would specifically "
+                   "hurt performance on that objective." if task_desc else "")
+            )
+        self._step_with_retry("skeptic", skeptic_task, ROLE_ANALYSIS)
+
+        # Statistician — guide focus if multicollinearity detected
+        stat_focus = ""
+        if data_metrics and len(data_metrics.high_corr_pairs) > FOCUS_STATISTICIAN_CORR_PAIRS:
+            top_pairs = data_metrics.high_corr_pairs[:5]
+            stat_focus = (
+                f"\nFOCUS: These high-correlation pairs were detected pre-LLM: {top_pairs}. "
+                "Prioritize multicollinearity analysis and VIF scores for these pairs."
+            )
+        if data_metrics and data_metrics.is_time_series:
+            stat_focus += "\nFOCUS: Time-series data — also check autocorrelation and stationarity."
+
         self._step_with_retry(
             "statistician",
             "Analyze feature distributions, skewness, multicollinearity, and the "
             "statistical significance of key correlations. For non-tabular data, "
-            "describe what statistical measures apply and flag distributional red flags.",
+            "describe what statistical measures apply and flag distributional red flags."
+            + stat_focus + profile_ctx,
             ROLE_ANALYSIS,
         )
 
@@ -125,20 +193,30 @@ class DataUnderstandingPhase(BasePhase):
                 )
                 specialist_reports[spec.name] = out
 
-        # ── Stage 3: Ethicist (optional) ──────────────────────────────────
+        # ── Stage 3: Ethicist (optional, early-stop if data is very clean) ──
         ethics_notes = ""
         if "ethicist" in orch.agents:
-            print("\n⚡ [DataUnderstanding] Ethicist reviewing for bias...")
-            ethics_notes = self._step_with_retry(
-                "ethicist",
-                "Identify sensitive attributes, potential proxy variables, bias risks, "
-                "and fairness concerns. If non-tabular data (images, audio, text) is "
-                "present, flag representational bias risks." + (
-                    f"\n\nGiven the stated goal: {task_desc} — flag any ethical concerns "
-                    "specifically relevant to this use-case." if task_desc else ""
-                ),
-                ROLE_ANALYSIS,
+            # Early stopping: skip Ethicist only if data profile shows no sensitive signals
+            has_sensitive_signals = (
+                data_metrics is None
+                or data_metrics.data_quality_score < SKIP_ETHICIST_QUALITY_THRESHOLD
+                or data_metrics.class_imbalance > 0.2
+                or any(kw in " ".join(orch.agents).lower() for kw in ("image", "audio", "text", "nlp"))
             )
+            if has_sensitive_signals:
+                print("\n⚡ [DataUnderstanding] Ethicist reviewing for bias...")
+                ethics_notes = self._step_with_retry(
+                    "ethicist",
+                    "Identify sensitive attributes, potential proxy variables, bias risks, "
+                    "and fairness concerns. If non-tabular data (images, audio, text) is "
+                    "present, flag representational bias risks." + (
+                        f"\n\nGiven the stated goal: {task_desc} — flag any ethical concerns "
+                        "specifically relevant to this use-case." if task_desc else ""
+                    ),
+                    ROLE_ANALYSIS,
+                )
+            else:
+                print(f"\n⚡ [DataUnderstanding] Ethicist skipped (data quality={data_metrics.data_quality_score:.2f}, no sensitive signals detected)")
 
         # ── Summary ───────────────────────────────────────────────────────
         explorer_out = self._last_output("explorer")
@@ -151,7 +229,8 @@ class DataUnderstandingPhase(BasePhase):
             summary=(
                 f"Data understanding complete ({n_agents} agents"
                 f"{', builder used' if used_builder else ''}). "
-                f"EDA: {explorer_out[:120]}..."
+                + (f"Quality={data_metrics.data_quality_score:.2f}. " if data_metrics else "")
+                + f"EDA: {explorer_out[:100]}..."
             ),
             outputs={
                 "eda_summary":        explorer_out,
@@ -160,6 +239,7 @@ class DataUnderstandingPhase(BasePhase):
                 "specialist_reports": specialist_reports,
                 "ethics_notes":       ethics_notes,
                 "build_plan":         build_plan,
+                "data_metrics":       data_metrics,
             },
         )
 

@@ -61,6 +61,7 @@ class Orchestrator:
         self.installer        = LibraryInstallerAgent()
         self.run_id           = str(uuid.uuid4())[:12]
         self._last_node_id    = None
+        self._data_metrics    = {}   # populated by DataUnderstandingPhase via DataProfiler
 
         # Wire LLM into compactor
         if self.memory and self.llm:
@@ -504,8 +505,16 @@ class Orchestrator:
         # --- Phase 1: DataUnderstanding ---
         p = self._get_phase(phases, "data_understanding")
         if p:
-            r = p.run(dataset_summary=dataset_summary, dataset_profile=dataset_profile)
+            r = p.run(
+                dataset_summary=dataset_summary,
+                dataset_profile=dataset_profile,
+                dataset_path=dataset_path,
+                target_col=target_col,
+            )
             results["data_understanding"] = r
+            # Adapt personalities based on data quality profile
+            if r.outputs.get("data_metrics"):
+                self._adapt_agent_personalities(self._data_metrics)
             if not r.success:
                 print(f"\n⚠️  DataUnderstanding failed: {r.error}. Continuing anyway.")
 
@@ -572,6 +581,57 @@ class Orchestrator:
             if p.name == name:
                 return p
         return None
+
+    # ------------------------------------------------------------------ #
+    # Utilities                                                            #
+    # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # Adaptive personalities                                               #
+    # ------------------------------------------------------------------ #
+
+    def _adapt_agent_personalities(self, metrics: dict):
+        """
+        Adjust agent behavioral configs dynamically based on run state.
+
+        Inspired by Karpathy's adaptive systems:
+        'Parameters should respond to the state of the world, not be hardcoded.'
+
+        Called by CodeGenerationPhase after each training failure.
+        Also called at the start of DataUnderstandingPhase with data profiler metrics.
+        """
+        if not metrics:
+            return
+
+        adapted_count = 0
+        for name, agent in self.agents.items():
+            if agent.config is not None:
+                new_cfg = agent.config.adapt(metrics)
+                # Only reassign if something actually changed
+                if (new_cfg.activity_level != agent.config.activity_level or
+                        new_cfg.sentiment_bias != agent.config.sentiment_bias):
+                    agent.config = new_cfg
+                    adapted_count += 1
+
+        if adapted_count:
+            print(f"[Orchestrator] 🧠 Adapted {adapted_count} agent personality config(s) based on run metrics")
+
+    # ------------------------------------------------------------------ #
+    # Conversation interface                                               #
+    # ------------------------------------------------------------------ #
+
+    def discuss(self, participants: list, topic: str, max_turns: int = 4) -> list:
+        """
+        Start a multi-turn conversation between agents on a topic.
+        Delegates to ConversationManager. Returns transcript.
+        """
+        from orchestration.conversation_manager import ConversationManager
+        return ConversationManager(self).discuss(participants, topic, max_turns)
+
+    def converge(self, agent_a: str, agent_b: str, question: str, max_turns: int = 4) -> str:
+        """Two agents discuss until one says CONCLUDED: <verdict>."""
+        from orchestration.conversation_manager import ConversationManager
+        return ConversationManager(self).converge(agent_a, agent_b, question, max_turns)
 
     # ------------------------------------------------------------------ #
     # Utilities                                                            #
