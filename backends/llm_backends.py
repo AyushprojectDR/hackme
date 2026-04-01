@@ -16,7 +16,7 @@ def get_llm(provider: str, model: str = None, base_url: str = None, **kwargs):
     if provider == "claude":
         api_key = os.getenv("ANTHROPIC_API_KEY")
         return ChatAnthropic(
-            model=model or "claude-3-5-haiku-20241022",
+            model=model or "claude-haiku-4-5",
             api_key=api_key,
             **kwargs
         )

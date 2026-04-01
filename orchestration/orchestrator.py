@@ -495,9 +495,9 @@ class Orchestrator:
             phases = [
                 DataUnderstandingPhase(self),
                 ModelDesignPhase(self),
-                CodeGenerationPhase(self),
-                ValidationPhase(self),
-                InferencePhase(self),
+                # CodeGenerationPhase(self),   # PAUSED — code generation disabled
+                # ValidationPhase(self),        # PAUSED — depends on code generation
+                # InferencePhase(self),         # PAUSED — depends on code generation
             ]
 
         results: dict = {}
@@ -527,39 +527,43 @@ class Orchestrator:
                 print(f"\n⚠️  ModelDesign failed: {r.error}. Continuing anyway.")
 
         # --- Phase 3: CodeGeneration ---
+        # PAUSED: code generation + execution disabled while working on analysis/planning only.
+        # Uncomment the block below to re-enable.
         code_result = None
-        p = self._get_phase(phases, "code_generation")
-        if p:
-            r = p.run(
-                dataset_path=dataset_path,
-                target_col=target_col,
-                max_retries=max_retries,
-                experiment_dir=experiment_dir,
-            )
-            results["code_generation"] = r
-            code_result = r.outputs.get("execution_result")
+        # p = self._get_phase(phases, "code_generation")
+        # if p:
+        #     r = p.run(
+        #         dataset_path=dataset_path,
+        #         target_col=target_col,
+        #         max_retries=max_retries,
+        #         experiment_dir=experiment_dir,
+        #     )
+        #     results["code_generation"] = r
+        #     code_result = r.outputs.get("execution_result")
 
         # --- Phase 4: Validation ---
-        p = self._get_phase(phases, "validation")
-        if p:
-            cg_r    = results.get("code_generation")
-            metrics = cg_r.outputs.get("metrics", {}) if cg_r else {}
-            r = p.run(
-                execution_result=code_result,
-                metrics=metrics,
-            )
-            results["validation"] = r
+        # PAUSED: depends on code generation — disabled alongside Phase 3.
+        # p = self._get_phase(phases, "validation")
+        # if p:
+        #     cg_r    = results.get("code_generation")
+        #     metrics = cg_r.outputs.get("metrics", {}) if cg_r else {}
+        #     r = p.run(
+        #         execution_result=code_result,
+        #         metrics=metrics,
+        #     )
+        #     results["validation"] = r
 
         # --- Phase 5: Inference ---
-        p = self._get_phase(phases, "inference")
-        if p:
-            cg = results.get("code_generation")
-            r = p.run(
-                metrics=cg.outputs.get("metrics", {}) if cg else {},
-                training_succeeded=cg.outputs.get("succeeded", False) if cg else False,
-                experiment_dir=experiment_dir,
-            )
-            results["inference"] = r
+        # PAUSED: depends on code generation — disabled alongside Phase 3.
+        # p = self._get_phase(phases, "inference")
+        # if p:
+        #     cg = results.get("code_generation")
+        #     r = p.run(
+        #         metrics=cg.outputs.get("metrics", {}) if cg else {},
+        #         training_succeeded=cg.outputs.get("succeeded", False) if cg else False,
+        #         experiment_dir=experiment_dir,
+        #     )
+        #     results["inference"] = r
 
         # --- Persist context ---
         log_path = os.path.join(experiment_dir, f"context_{self.run_id}.json")
