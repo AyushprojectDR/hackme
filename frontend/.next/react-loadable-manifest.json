@@ -1,16 +1,14 @@
 {
-  "../node_modules/@react-three/drei/core/VideoTexture.js -> hls.js": {
-    "id": "../node_modules/@react-three/drei/core/VideoTexture.js -> hls.js",
-    "files": []
-  },
-  "../node_modules/@react-three/drei/web/FaceLandmarker.js -> @mediapipe/tasks-vision": {
-    "id": "../node_modules/@react-three/drei/web/FaceLandmarker.js -> @mediapipe/tasks-vision",
-    "files": []
-  },
-  "app/run/[id]/page.tsx -> @/components/AgentNetwork": {
-    "id": "app/run/[id]/page.tsx -> @/components/AgentNetwork",
+  "app/page.tsx -> @/components/ParticleField": {
+    "id": "app/page.tsx -> @/components/ParticleField",
     "files": [
-      "static/chunks/_app-pages-browser_src_components_AgentNetwork_tsx.js"
+      "static/chunks/_app-pages-browser_src_components_ParticleField_tsx.js"
+    ]
+  },
+  "app/run/[id]/page.tsx -> @/components/AgentCanvas": {
+    "id": "app/run/[id]/page.tsx -> @/components/AgentCanvas",
+    "files": [
+      "static/chunks/_app-pages-browser_src_components_AgentCanvas_tsx.js"
     ]
   }
 }

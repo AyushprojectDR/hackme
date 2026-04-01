@@ -1,18 +1,15 @@
 """
 FastAPI backend — Multi-Agent DS Team
 ======================================
-Replaces app.py (Streamlit).
-
 Endpoints:
   GET  /api/creds              — load saved credentials
   POST /api/creds              — save credentials
   GET  /api/browse?dir=false   — open native file/folder picker
   POST /api/run                — start pipeline, returns { runId }
-  WS   /ws/{run_id}            — stream log + state updates in real time
+  GET  /api/poll/{run_id}?cursor=N — poll for new log lines + state
   GET  /api/result/{run_id}    — get final result / report
 
 Run:
-  pip install fastapi uvicorn[standard]
   python server.py
 """
 
@@ -21,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import queue
 import subprocess
 import sys
 import threading
@@ -33,7 +29,7 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -123,6 +119,16 @@ def _parse_log_line(line: str) -> dict:
     elif "phase 4" in low or "validation"         in low: phase = "Phase 4 · Validation"
     elif "phase 5" in low or "inference"          in low: phase = "Phase 5 · Inference"
 
+    # Also detect phase from graph log lines like "⚡ [DataUnderstanding]"
+    if not phase:
+        if "dataunderstanding" in low or "[dataunders" in low: phase = "Phase 1 · Data Understanding"
+        elif "modeldesign"     in low or "[modeldesig" in low: phase = "Phase 2 · Model Design"
+
+    # Detect scanning/startup phase from common log prefixes
+    if not phase:
+        if "scanning dataset" in low or "files :" in low or "builderagent" in low:
+            phase = "Phase 1 · Data Understanding"
+
     agent = ""
     for key, name in _AGENT_KEYS.items():
         if key in low:
@@ -133,31 +139,69 @@ def _parse_log_line(line: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# In-memory run store
+# In-memory run store  (log lines list, not queue — supports random access)
 # ─────────────────────────────────────────────────────────────────────
 class RunState:
     def __init__(self):
-        self.log_queue: queue.Queue = queue.Queue()
-        self.result:   Optional[dict] = None
-        self.error:    Optional[str]  = None
-        self.done:     bool           = False
+        self.lines:       list[str] = []   # all log lines so far
+        self.phase:       str       = "Initializing…"
+        self.agent:       str       = ""
+        self.ever_active: list[str] = []
+        self.result:      Optional[dict] = None
+        self.error:       Optional[str]  = None
+        self.done:        bool           = False
+        self._lock = threading.Lock()
+
+    def add_text(self, text: str):
+        new_lines = [l for l in text.splitlines() if l.strip()]
+        with self._lock:
+            self.lines.extend(new_lines)
+            for line in new_lines:
+                parsed = _parse_log_line(line)
+                if parsed["phase"]:
+                    self.phase = parsed["phase"]
+                if parsed["agent"]:
+                    self.agent = parsed["agent"]
+                    if parsed["agent"] not in self.ever_active:
+                        self.ever_active.append(parsed["agent"])
+
+    def snapshot(self, cursor: int) -> dict:
+        with self._lock:
+            new_lines = self.lines[cursor:]
+            return {
+                "lines":      new_lines,
+                "cursor":     cursor + len(new_lines),
+                "phase":      self.phase,
+                "agent":      self.agent,
+                "everActive": list(self.ever_active),
+                "done":       self.done,
+                "error":      self.error,
+            }
 
 runs: dict[str, RunState] = {}
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Stdout tee
+# Stdout tee  (writes to RunState directly)
 # ─────────────────────────────────────────────────────────────────────
 class _Tee:
-    def __init__(self, q: queue.Queue, orig):
-        self.q = q; self.orig = orig
-    def write(self, t: str):
-        if t: self.q.put(t)
-        try: self.orig.write(t); self.orig.flush()
-        except: pass
+    def __init__(self, state: RunState, orig):
+        self.state = state
+        self.orig  = orig
+
+    def write(self, text: str):
+        if text:
+            self.state.add_text(text)
+        try:
+            self.orig.write(text)
+            self.orig.flush()
+        except Exception:
+            pass
+
     def flush(self):
         try: self.orig.flush()
-        except: pass
+        except Exception: pass
+
     def fileno(self): return self.orig.fileno()
 
 
@@ -166,7 +210,6 @@ class _Tee:
 # ─────────────────────────────────────────────────────────────────────
 def _run_pipeline(cfg: dict) -> dict:
     from backends.llm_backends    import get_llm
-    from backends.fallback        import build_fallback_llm
     from agents import (ExplorerAgent, SkepticAgent, StatisticianAgent, EthicistAgent,
                         PragmatistAgent, DevilAdvocateAgent, ArchitectAgent, OptimizerAgent,
                         StorytellerAgent, CodeWriterAgent)
@@ -184,8 +227,10 @@ def _run_pipeline(cfg: dict) -> dict:
     exp_dir = cfg.get("experiment_dir", "experiments")
     os.makedirs(exp_dir, exist_ok=True)
 
-    if cfg["provider"] == "claude"  and cfg.get("api_key"): os.environ["ANTHROPIC_API_KEY"] = cfg["api_key"]
-    if cfg["provider"] == "openai"  and cfg.get("api_key"): os.environ["OPENAI_API_KEY"]    = cfg["api_key"]
+    if cfg["provider"] == "claude" and cfg.get("api_key"):
+        os.environ["ANTHROPIC_API_KEY"] = cfg["api_key"]
+    if cfg["provider"] == "openai" and cfg.get("api_key"):
+        os.environ["OPENAI_API_KEY"] = cfg["api_key"]
 
     print(f"\n📂 Scanning dataset: {cfg['dataset_path']}")
     disc    = DatasetDiscovery()
@@ -252,15 +297,15 @@ def _run_pipeline(cfg: dict) -> dict:
 def _thread_runner(run_id: str, cfg: dict):
     state = runs[run_id]
     old   = sys.stdout
-    sys.stdout = _Tee(state.log_queue, old)
+    sys.stdout = _Tee(state, old)
     try:
         state.result = _run_pipeline(cfg)
     except Exception:
         state.error = traceback.format_exc()
-        state.log_queue.put(f"\n❌ ERROR:\n{state.error}")
+        state.add_text(f"\n❌ ERROR:\n{state.error}")
     finally:
         sys.stdout = old
-        state.log_queue.put(None)  # sentinel
+        state.done = True
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -269,21 +314,18 @@ def _thread_runner(run_id: str, cfg: dict):
 
 @app.get("/api/creds")
 def get_creds():
-    c = _load_creds()
-    # Never send the full key to the frontend — send masked version
+    c   = _load_creds()
     key = c.get("api_key", "")
-    masked = ("•" * min(len(key), 40)) if key else ""
     return {
-        "provider":   c.get("provider", "claude"),
-        "hasKey":     bool(key),
-        "maskedKey":  masked,
-        "serverUrl":  c.get("server_url", ""),
+        "provider":  c.get("provider", "claude"),
+        "hasKey":    bool(key),
+        "serverUrl": c.get("server_url", ""),
     }
 
 
 class CredsPayload(BaseModel):
-    provider:  str
-    api_key:   str = ""
+    provider:   str
+    api_key:    str = ""
     server_url: str = ""
 
 @app.post("/api/creds")
@@ -301,18 +343,18 @@ async def browse(dir: bool = False):
 
 class RunPayload(BaseModel):
     provider:         str
-    api_key:          str = ""
-    server_url:       str = ""
+    api_key:          str  = ""
+    server_url:       str  = ""
     dataset_path:     str
-    task_description: str = ""
-    mode:             str = "phases"
-    target_col:       str = ""
-    model:            str = ""
-    max_retries:      int = 4
-    max_agents:       int = 5
+    task_description: str  = ""
+    mode:             str  = "phases"
+    target_col:       str  = ""
+    model:            str  = ""
+    max_retries:      int  = 4
+    max_agents:       int  = 5
     enable_memory:    bool = True
     enable_builder:   bool = True
-    experiment_dir:   str = "experiments"
+    experiment_dir:   str  = "experiments"
 
 @app.post("/api/run")
 def start_run(body: RunPayload):
@@ -320,7 +362,7 @@ def start_run(body: RunPayload):
     runs[run_id] = RunState()
 
     cfg = body.model_dump()
-    cfg["provider"] = "local" if cfg["provider"] == "local (vLLM)" else cfg["provider"]
+    cfg["provider"]   = "local" if cfg["provider"] == "local (vLLM)" else cfg["provider"]
     cfg["target_col"] = cfg["target_col"] or None
     cfg["model"]      = cfg["model"]      or None
 
@@ -329,58 +371,16 @@ def start_run(body: RunPayload):
     return {"runId": run_id}
 
 
-@app.websocket("/ws/{run_id}")
-async def websocket_endpoint(ws: WebSocket, run_id: str):
-    await ws.accept()
+@app.get("/api/poll/{run_id}")
+def poll(run_id: str, cursor: int = 0):
+    """
+    Returns new log lines since `cursor`, current phase/agent, and done status.
+    Frontend calls this every 1–2 seconds.
+    """
     state = runs.get(run_id)
     if not state:
-        await ws.send_json({"type": "error", "message": "Unknown run ID"})
-        await ws.close()
-        return
-
-    current_phase = ""
-    ever_active: list[str] = []
-
-    try:
-        while True:
-            try:
-                msg = state.log_queue.get_nowait()
-            except queue.Empty:
-                if state.done:
-                    break
-                await asyncio.sleep(0.05)
-                continue
-
-            if msg is None:
-                state.done = True
-                continue
-
-            # Send raw log chunk
-            await ws.send_json({"type": "log", "text": msg})
-
-            # Parse for structured state update
-            for line in msg.splitlines():
-                parsed = _parse_log_line(line)
-                if parsed["phase"] and parsed["phase"] != current_phase:
-                    current_phase = parsed["phase"]
-                    await ws.send_json({"type": "phase", "phase": current_phase})
-                if parsed["agent"]:
-                    if parsed["agent"] not in ever_active:
-                        ever_active.append(parsed["agent"])
-                    await ws.send_json({
-                        "type":        "agent",
-                        "agent":       parsed["agent"],
-                        "everActive":  ever_active,
-                    })
-
-        # Pipeline finished — send final result
-        if state.error:
-            await ws.send_json({"type": "done", "error": state.error})
-        else:
-            await ws.send_json({"type": "done", "error": None, "runId": run_id})
-
-    except WebSocketDisconnect:
-        pass
+        return {"error": "Unknown run ID", "done": True}
+    return state.snapshot(cursor)
 
 
 @app.get("/api/result/{run_id}")
@@ -388,7 +388,7 @@ def get_result(run_id: str):
     state = runs.get(run_id)
     if not state:
         return {"error": "Unknown run ID"}
-    if not state.done and not state.result:
+    if not state.done:
         return {"error": "Still running"}
     if state.error:
         return {"error": state.error}

@@ -1,15 +1,18 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import dynamic from 'next/dynamic'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
+
+const ParticleField = dynamic(() => import('@/components/ParticleField'), { ssr: false, loading: () => null })
 
 const API = 'http://localhost:8000'
 
 const PROVIDERS = [
-  { id: 'claude', label: 'Claude',      hint: 'sk-ant-...' },
-  { id: 'openai', label: 'OpenAI',      hint: 'sk-...' },
-  { id: 'local',  label: 'Local vLLM',  hint: 'http://localhost:8000/v1' },
+  { id: 'claude', label: 'Claude' },
+  { id: 'openai', label: 'OpenAI' },
+  { id: 'local',  label: 'Local vLLM' },
 ]
 
 export default function SetupPage() {
@@ -22,21 +25,25 @@ export default function SetupPage() {
   const [datasetPath, setDatasetPath] = useState('')
   const [datasetName, setDatasetName] = useState('')
   const [task,        setTask]        = useState('')
-  const [loading,     setLoading]     = useState(false)
+  const [launching,   setLaunching]   = useState(false)
   const [errors,      setErrors]      = useState<string[]>([])
-  const [showSettings,setShowSettings]= useState(false)
+  const [showCreds,   setShowCreds]   = useState(false)
   const [ovKey,       setOvKey]       = useState('')
-  const [ovUrl,       setOvUrl]       = useState('')
 
-  // Load saved credentials on mount
+  // Coordinate card-exit animation with API response
+  const runIdRef   = useRef('')
+  const canNavRef  = useRef(false)
+  const tryNavigate = useCallback(() => {
+    if (runIdRef.current && canNavRef.current) router.push(`/run/${runIdRef.current}`)
+  }, [router])
+
   useEffect(() => {
     fetch(`${API}/api/creds`)
       .then(r => r.json())
       .then(d => {
-        setProvider(d.provider || 'claude')
+        setProvider(d.provider ?? 'claude')
         setHasKey(d.hasKey)
-        setServerUrl(d.serverUrl || '')
-        setOvUrl(d.serverUrl || '')
+        setServerUrl(d.serverUrl ?? '')
       })
       .catch(() => {})
   }, [])
@@ -47,36 +54,34 @@ export default function SetupPage() {
       const d = await r.json()
       if (d.path) {
         setDatasetPath(d.path)
-        setDatasetName(d.path.split('/').pop() || d.path)
+        setDatasetName(d.path.split('/').pop() ?? d.path)
       }
     } catch {
-      setErrors(['Could not open file picker. Is the server running?'])
+      setErrors(['Cannot reach server. Run: python server.py'])
     }
   }
 
-  const saveSettings = async () => {
+  const saveCreds = async () => {
     await fetch(`${API}/api/creds`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, api_key: ovKey, server_url: ovUrl }),
+      body: JSON.stringify({ provider, api_key: ovKey, server_url: serverUrl }),
     })
     setHasKey(!!ovKey)
-    setServerUrl(ovUrl)
-    setShowSettings(false)
+    setShowCreds(false)
   }
 
   const launch = async () => {
     const errs: string[] = []
-    if (!datasetPath)           errs.push('Select a dataset first.')
+    if (!datasetPath)                               errs.push('Select a dataset.')
     if (provider !== 'local' && !apiKey && !hasKey) errs.push('API key required.')
-    if (provider === 'local' && !serverUrl)          errs.push('vLLM server URL required.')
+    if (provider === 'local' && !serverUrl)          errs.push('vLLM URL required.')
     if (errs.length) { setErrors(errs); return }
 
     setErrors([])
-    setLoading(true)
+    setLaunching(true) // ← card starts flying up immediately
 
     try {
-      // Save credentials
       if (provider !== 'local' && apiKey) {
         await fetch(`${API}/api/creds`, {
           method: 'POST',
@@ -84,176 +89,222 @@ export default function SetupPage() {
           body: JSON.stringify({ provider, api_key: apiKey, server_url: '' }),
         })
       }
-
       const r = await fetch(`${API}/api/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider,
-          api_key:          apiKey,
-          server_url:       serverUrl,
-          dataset_path:     datasetPath,
-          task_description: task,
-          mode:             'phases',
-        }),
+        body: JSON.stringify({ provider, api_key: apiKey, server_url: serverUrl, dataset_path: datasetPath, task_description: task }),
       })
       const d = await r.json()
-      if (d.runId) router.push(`/run/${d.runId}`)
-      else         setErrors([d.detail || 'Failed to start pipeline.'])
-    } catch (e) {
-      setErrors(['Cannot reach server at localhost:8000. Is it running?'])
-    } finally {
-      setLoading(false)
+      if (d.runId) {
+        runIdRef.current = d.runId
+        tryNavigate() // navigate now if animation already finished
+      } else {
+        setLaunching(false)
+        setErrors([d.detail ?? 'Failed to start.'])
+      }
+    } catch {
+      setLaunching(false)
+      setErrors(['Cannot reach server at localhost:8000'])
     }
   }
 
   return (
-    <main className="min-h-screen bg-bg dot-grid flex flex-col items-center justify-center px-4 py-12">
+    <main style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem', position: 'relative' }}>
 
-      {/* Ambient glow blobs */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-200px] left-[-200px] w-[600px] h-[600px] rounded-full bg-indigo-600/5 blur-[120px]" />
-        <div className="absolute bottom-[-200px] right-[-200px] w-[600px] h-[600px] rounded-full bg-sky-600/5 blur-[120px]" />
+      {/* 3D particle background */}
+      <ParticleField launching={launching} />
+
+      {/* Ambient blobs */}
+      <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 1 }}>
+        <div style={{ position: 'absolute', top: '20%', left: '15%', width: 500, height: 500, borderRadius: '50%', background: 'radial-gradient(circle, rgba(99,102,241,0.06) 0%, transparent 70%)', filter: 'blur(60px)' }} />
+        <div style={{ position: 'absolute', bottom: '20%', right: '15%', width: 400, height: 400, borderRadius: '50%', background: 'radial-gradient(circle, rgba(6,182,212,0.05) 0%, transparent 70%)', filter: 'blur(60px)' }} />
       </div>
 
+      {/* Form panel */}
       <motion.div
-        initial={{ opacity: 0, y: 24 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="w-full max-w-[480px] relative z-10"
+        initial={{ opacity: 0, y: 28 }}
+        animate={launching
+          ? { opacity: 0, y: -120, scale: 0.88 }
+          : { opacity: 1, y: 0,    scale: 1    }
+        }
+        transition={launching
+          ? { duration: 0.65, ease: [0.25, 0, 0.55, 1] }
+          : { duration: 0.6,  ease: [0.16, 1, 0.3,  1] }
+        }
+        onAnimationComplete={() => {
+          if (launching) {
+            canNavRef.current = true
+            tryNavigate() // navigate now if API already responded
+          }
+        }}
+        style={{ position: 'relative', zIndex: 10, width: '100%', maxWidth: 440 }}
       >
+
         {/* Header */}
-        <div className="flex items-start justify-between mb-8">
-          <div>
-            <h1 className="glow-text font-display text-3xl font-bold leading-tight">
-              ⬡ DS Agent Team
+        <div style={{ marginBottom: '2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div className="fade-up">
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: 'rgba(99,102,241,0.7)', letterSpacing: '0.2em', textTransform: 'uppercase', marginBottom: 10 }}>
+              Multi-Agent DS Team
+            </div>
+            <h1 style={{
+              fontFamily: "'Space Grotesk', sans-serif",
+              fontSize: 'clamp(28px, 5vw, 38px)',
+              fontWeight: 700,
+              lineHeight: 1.15,
+              background: 'linear-gradient(135deg, #fff 0%, #a78bfa 45%, #38bdf8 100%)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              backgroundClip: 'text',
+            }}>
+              Analyse any<br />dataset.
             </h1>
-            <p className="text-slate-600 text-xs tracking-[0.15em] uppercase mt-1">
-              Autonomous · Adaptive · Intelligent
-            </p>
           </div>
           <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="mt-1 w-8 h-8 rounded-lg border border-slate-800 bg-slate-900/50 hover:border-indigo-500/50 hover:bg-indigo-500/10 transition-all text-slate-500 hover:text-slate-300 text-sm flex items-center justify-center"
+            onClick={() => setShowCreds(!showCreds)}
+            style={{ marginTop: 4, width: 34, height: 34, borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 14, transition: 'all 0.2s', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             title="Saved credentials"
           >
             ⚙
           </button>
         </div>
 
-        {/* Settings panel */}
+        {/* Credentials override */}
         <AnimatePresence>
-          {showSettings && (
+          {showCreds && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: 'auto' }}
               exit={{ opacity: 0, height: 0 }}
-              className="overflow-hidden mb-5"
+              style={{ overflow: 'hidden', marginBottom: '1rem' }}
             >
-              <div className="glass p-4 space-y-3">
-                <p className="text-xs font-display font-semibold text-indigo-400 uppercase tracking-widest">
-                  Override saved credentials
-                </p>
+              <div className="glass" style={{ padding: '1rem', marginBottom: 2 }}>
+                <div className="label" style={{ marginBottom: '0.6rem' }}>Override saved key</div>
                 <input
-                  className="input-field"
+                  className="field"
                   type="password"
-                  placeholder="API Key"
+                  placeholder="Paste new API key…"
                   value={ovKey}
                   onChange={e => setOvKey(e.target.value)}
+                  style={{ marginBottom: '0.6rem' }}
                 />
-                <input
-                  className="input-field"
-                  type="text"
-                  placeholder="vLLM URL (optional)"
-                  value={ovUrl}
-                  onChange={e => setOvUrl(e.target.value)}
-                />
-                <button onClick={saveSettings} className="btn-secondary w-full text-xs py-2">
-                  Save credentials
+                <button className="btn-ghost" style={{ width: '100%' }} onClick={saveCreds}>
+                  Save
                 </button>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <div className="space-y-5">
+        <div className="glass fade-up-d1" style={{ padding: '1.6rem', display: 'flex', flexDirection: 'column', gap: '1.2rem' }}>
 
-          {/* 1 — Provider */}
-          <section className="glass p-5">
-            <SectionLabel>Provider</SectionLabel>
-            <div className="flex gap-2 mb-4">
+          {/* Provider */}
+          <div>
+            <div className="label" style={{ marginBottom: '0.55rem' }}>Provider</div>
+            <div style={{ display: 'flex', gap: 6 }}>
               {PROVIDERS.map(p => (
                 <button
                   key={p.id}
                   onClick={() => setProvider(p.id)}
-                  className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold font-display border transition-all ${
-                    provider === p.id
-                      ? 'bg-indigo-500/20 border-indigo-500/60 text-indigo-300'
-                      : 'bg-transparent border-slate-800 text-slate-500 hover:border-slate-600 hover:text-slate-400'
-                  }`}
+                  style={{
+                    flex: 1,
+                    padding: '8px 6px',
+                    borderRadius: 9,
+                    border: `1px solid ${provider === p.id ? 'rgba(99,102,241,0.55)' : 'rgba(255,255,255,0.07)'}`,
+                    background: provider === p.id ? 'rgba(99,102,241,0.15)' : 'rgba(255,255,255,0.03)',
+                    color: provider === p.id ? '#c4b5fd' : 'rgba(255,255,255,0.3)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    fontFamily: "'Space Grotesk', sans-serif",
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                    letterSpacing: '0.03em',
+                  }}
                 >
                   {p.label}
                 </button>
               ))}
             </div>
+          </div>
 
+          {/* API key / Server URL */}
+          <div>
             {provider === 'local' ? (
               <input
-                className="input-field"
+                className="field"
                 placeholder="http://localhost:8000/v1"
                 value={serverUrl}
                 onChange={e => setServerUrl(e.target.value)}
               />
             ) : (
-              <div className="relative">
+              <div style={{ position: 'relative' }}>
                 <input
-                  className="input-field pr-24"
+                  className="field"
                   type="password"
-                  placeholder={PROVIDERS.find(p => p.id === provider)?.hint}
+                  placeholder={provider === 'claude' ? 'sk-ant-…  Anthropic key' : 'sk-…  OpenAI key'}
                   value={apiKey}
                   onChange={e => setApiKey(e.target.value)}
+                  style={{ paddingRight: hasKey && !apiKey ? 80 : 16 }}
                 />
                 {hasKey && !apiKey && (
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-emerald-400 font-semibold tracking-wide">
+                  <span style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 10, color: '#4ade80', fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
                     ✓ saved
                   </span>
                 )}
               </div>
             )}
-          </section>
+          </div>
 
-          {/* 2 — Dataset */}
-          <section className="glass p-5">
-            <SectionLabel>Dataset</SectionLabel>
-            <div className="flex gap-2 mb-3">
-              <button onClick={() => browse(false)} className="btn-secondary flex-1">
-                <span className="mr-1.5">📄</span> File
+          {/* Dataset */}
+          <div>
+            <div className="label" style={{ marginBottom: '0.55rem' }}>Dataset</div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: datasetPath ? 8 : 0 }}>
+              <button className="btn-ghost" style={{ flex: 1 }} onClick={() => browse(false)}>
+                📄 File
               </button>
-              <button onClick={() => browse(true)} className="btn-secondary flex-1">
-                <span className="mr-1.5">📁</span> Folder
+              <button className="btn-ghost" style={{ flex: 1 }} onClick={() => browse(true)}>
+                📁 Folder
               </button>
             </div>
-            {datasetPath ? (
-              <div className="rounded-lg bg-emerald-500/8 border border-emerald-500/20 px-3 py-2 text-xs text-emerald-400 flex items-center gap-2">
-                <span className="opacity-60">✓</span>
-                <span className="truncate font-mono">{datasetName}</span>
-              </div>
-            ) : (
-              <p className="text-xs text-slate-700 pl-0.5">No file selected</p>
+            {datasetPath && (
+              <motion.div
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 12px',
+                  borderRadius: 8,
+                  background: 'rgba(34,197,94,0.07)',
+                  border: '1px solid rgba(34,197,94,0.2)',
+                }}
+              >
+                <span style={{ color: '#4ade80', fontSize: 12 }}>✓</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: 'rgba(255,255,255,0.55)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {datasetName}
+                </span>
+              </motion.div>
             )}
-          </section>
+            {!datasetPath && (
+              <p style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.12)', paddingTop: 2 }}>No file selected</p>
+            )}
+          </div>
 
-          {/* 3 — Task (optional) */}
-          <section className="glass p-5">
-            <SectionLabel optional>What to analyse?</SectionLabel>
+          {/* Task */}
+          <div>
+            <div className="label" style={{ marginBottom: '0.55rem' }}>
+              Goal
+              <span style={{ color: 'rgba(255,255,255,0.15)', textTransform: 'none', letterSpacing: 0, fontFamily: "'Inter', sans-serif", fontWeight: 400, fontSize: 10, marginLeft: 6 }}>optional</span>
+            </div>
             <textarea
-              className="input-field resize-none text-sm"
-              rows={3}
+              className="field"
+              rows={2}
               placeholder="e.g. Predict house prices. Metric: RMSE."
               value={task}
               onChange={e => setTask(e.target.value)}
+              style={{ resize: 'none', lineHeight: 1.5 }}
             />
-          </section>
+          </div>
 
           {/* Errors */}
           <AnimatePresence>
@@ -262,91 +313,36 @@ export default function SetupPage() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
-                className="rounded-xl border border-red-500/30 bg-red-500/8 px-4 py-3 text-sm text-red-400 space-y-1"
+                style={{ padding: '10px 14px', borderRadius: 9, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)' }}
               >
-                {errors.map((e, i) => <p key={i}>✗ {e}</p>)}
+                {errors.map((e, i) => (
+                  <p key={i} style={{ fontSize: 12.5, color: '#f87171' }}>✗ {e}</p>
+                ))}
               </motion.div>
             )}
           </AnimatePresence>
 
           {/* Launch */}
-          <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-            onClick={launch}
-            disabled={loading}
-            className="w-full py-3.5 rounded-xl font-display font-semibold text-sm tracking-wide
-              bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-600 background-animate
-              text-white shadow-[0_0_32px_rgba(99,102,241,0.4)]
-              hover:shadow-[0_0_55px_rgba(99,102,241,0.65)] transition-shadow
-              disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {loading ? (
-              <span className="flex items-center justify-center gap-2">
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Starting…
-              </span>
-            ) : (
-              'Launch Analysis →'
-            )}
-          </motion.button>
+          <button className="btn-primary" onClick={launch} disabled={launching}>
+            Launch Analysis →
+          </button>
 
         </div>
+
+        {/* Footer status */}
+        <div className="fade-up-d5" style={{ marginTop: '1.2rem', textAlign: 'center' }}>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: 'rgba(255,255,255,0.1)', letterSpacing: '0.08em' }}>
+            localhost:8000 · localhost:3000
+          </span>
+        </div>
+
       </motion.div>
 
       <style jsx global>{`
-        .input-field {
-          width: 100%;
-          background: rgba(10, 14, 38, 0.8);
-          border: 1px solid rgba(99,102,241,0.2);
-          border-radius: 10px;
-          padding: 10px 14px;
-          color: #e2e8f0;
-          font-size: 0.875rem;
-          font-family: 'Inter', sans-serif;
-          outline: none;
-          transition: border-color 0.2s, box-shadow 0.2s;
-        }
-        .input-field::placeholder { color: #334155; }
-        .input-field:focus {
-          border-color: rgba(99,102,241,0.6);
-          box-shadow: 0 0 0 3px rgba(99,102,241,0.1);
-        }
-        .btn-secondary {
-          background: rgba(15,23,42,0.6);
-          border: 1px solid rgba(99,102,241,0.2);
-          border-radius: 10px;
-          padding: 9px 14px;
-          color: #94a3b8;
-          font-size: 0.8rem;
-          font-family: 'Inter', sans-serif;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-        .btn-secondary:hover {
-          border-color: rgba(99,102,241,0.5);
-          background: rgba(99,102,241,0.1);
-          color: #c4b5fd;
-        }
-        .background-animate {
-          background-size: 200% 200%;
-          animation: shimmer 4s ease infinite;
-        }
-        @keyframes shimmer {
-          0%   { background-position: 0% 50%; }
-          50%  { background-position: 100% 50%; }
-          100% { background-position: 0% 50%; }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
         }
       `}</style>
     </main>
-  )
-}
-
-function SectionLabel({ children, optional }: { children: React.ReactNode; optional?: boolean }) {
-  return (
-    <p className="text-[10px] font-display font-semibold text-indigo-400 uppercase tracking-[0.15em] mb-3 flex items-center gap-2">
-      {children}
-      {optional && <span className="text-slate-700 normal-case tracking-normal font-sans font-normal">optional</span>}
-    </p>
   )
 }
