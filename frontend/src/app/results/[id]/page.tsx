@@ -1,206 +1,46 @@
 'use client'
 
 import { useParams, useRouter } from 'next/navigation'
-import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useFrame, useThree } from '@react-three/fiber'
-import CanvasSafe from '@/components/CanvasSafe'
-import { Stars, Text } from '@react-three/drei'
-import * as THREE from 'three'
 
 const API = 'http://localhost:8000'
 
-// ─────────────────────────────────────────────────────────────────────────
-// Agent config
-// ─────────────────────────────────────────────────────────────────────────
+interface Entry { role: string; agent: string; content: string; metadata: Record<string, unknown> }
 
-interface Entry { role: string; agent: string; content: string; metadata: Record<string,unknown> }
-interface AgentNode { id: string; label: string; color: string; pos: [number,number,number]; content: string }
-
-const AGENT_META: Record<string, { color: string; label: string }> = {
-  explorer:         { color: '#a78bfa', label: 'Explorer' },
-  skeptic:          { color: '#f472b6', label: 'Skeptic' },
-  statistician:     { color: '#38bdf8', label: 'Statistician' },
-  feature_engineer: { color: '#34d399', label: 'Feat.Eng' },
-  ethicist:         { color: '#fb923c', label: 'Ethicist' },
-  pragmatist:       { color: '#facc15', label: 'Pragmatist' },
-  devil_advocate:   { color: '#f87171', label: 'Devil Adv' },
-  optimizer:        { color: '#818cf8', label: 'Optimizer' },
-  architect:        { color: '#c084fc', label: 'Architect' },
-  storyteller:      { color: '#f9a8d4', label: 'Storyteller' },
-  data_profiler:    { color: '#22d3ee', label: 'Profiler' },
+const AGENT_META: Record<string, { label: string; icon: string; color: string; role: string }> = {
+  explorer:         { label: 'Explorer',        icon: '◉', color: '#7c6fcd', role: 'Data Scout'       },
+  skeptic:          { label: 'Skeptic',          icon: '⚠', color: '#d46b8a', role: 'Quality Guard'    },
+  statistician:     { label: 'Statistician',     icon: '∑', color: '#4a9fd4', role: 'Numbers Expert'   },
+  feature_engineer: { label: 'Feature Engineer', icon: '⟁', color: '#3db87a', role: 'Signal Extractor' },
+  ethicist:         { label: 'Ethicist',         icon: '⚖', color: '#d4874a', role: 'Bias Detector'    },
+  pragmatist:       { label: 'Pragmatist',       icon: '◈', color: '#c4a832', role: 'Reality Check'    },
+  devil_advocate:   { label: 'Devil Advocate',   icon: '⛧', color: '#e63030', role: 'Critical Thinker' },
+  optimizer:        { label: 'Optimizer',        icon: '⚡', color: '#8a7cd4', role: 'Efficiency Expert'},
+  architect:        { label: 'Architect',        icon: '⬡', color: '#a86cd4', role: 'System Designer'  },
+  storyteller:      { label: 'Storyteller',      icon: '✦', color: '#d4a8c4', role: 'Insight Narrator' },
+  compactor:        { label: 'Compactor',        icon: '◎', color: '#888',    role: 'Context Manager'  },
+  system:           { label: 'System',           icon: '◌', color: '#666',    role: 'Context'          },
+  data_profiler:    { label: 'Data Profiler',    icon: '⊙', color: '#22d3ee', role: 'Auto Profiler'    },
 }
 
-// Positions in 3D space — arranged in concentric rings
-const POSITIONS: [number,number,number][] = [
-  [-4,  2.5, 0], [0,  3.5, 1], [4,  2.5, 0],  // top ring: analysis
-  [-4.5, 0, -1], [4.5, 0, -1],                  // sides: ethics + feat
-  [-3, -2, 1],  [0, -3, 0],  [3, -2, 1],        // middle: planning
-  [-1.5, -4.5, -1], [1.5, -4.5, -1],            // bottom: storyteller + optimizer
-  [0, 0.5, 3],                                   // front: profiler
-]
-
-// ─────────────────────────────────────────────────────────────────────────
-// 3D Graph components
-// ─────────────────────────────────────────────────────────────────────────
-
-function NodeSphere({ node, selected, onClick }: {
-  node: AgentNode
-  selected: boolean
-  onClick: () => void
-}) {
-  const mesh  = useRef<THREE.Mesh>(null!)
-  const ring  = useRef<THREE.Mesh>(null!)
-  const glow  = useRef<THREE.Mesh>(null!)
-
-  useFrame((state) => {
-    if (!mesh.current || !ring.current || !glow.current) return
-    const t = state.clock.elapsedTime
-    mesh.current.rotation.y = t * 0.4
-    if (selected) {
-      mesh.current.scale.setScalar(1.2 + Math.sin(t * 3) * 0.05)
-      ring.current.rotation.z = t * 2
-      ring.current.rotation.x = t * 0.5
-      glow.current.scale.setScalar(1.5 + Math.sin(t * 2) * 0.2)
-    } else {
-      mesh.current.scale.setScalar(1)
-      ring.current.rotation.z = t * 0.5
-    }
-  })
-
-  return (
-    <group position={node.pos} onClick={(e) => { e.stopPropagation(); onClick() }}>
-      {/* Glow halo */}
-      <mesh ref={glow}>
-        <sphereGeometry args={[0.52, 12, 12]} />
-        <meshBasicMaterial color={node.color} transparent opacity={selected ? 0.12 : 0.04} />
-      </mesh>
-
-      {/* Main sphere */}
-      <mesh ref={mesh}>
-        <sphereGeometry args={[0.38, 24, 24]} />
-        <meshStandardMaterial
-          color={node.color}
-          emissive={node.color}
-          emissiveIntensity={selected ? 1.2 : 0.4}
-          roughness={0.2} metalness={0.8}
-        />
-      </mesh>
-
-      {/* Rotating ring */}
-      <mesh ref={ring}>
-        <torusGeometry args={[0.58, selected ? 0.014 : 0.008, 8, 48]} />
-        <meshBasicMaterial color={node.color} transparent opacity={selected ? 0.9 : 0.35} />
-      </mesh>
-
-      {/* Second ring (selected only) */}
-      {selected && (
-        <mesh rotation={[Math.PI / 2, 0, 0]}>
-          <torusGeometry args={[0.75, 0.006, 8, 48]} />
-          <meshBasicMaterial color={node.color} transparent opacity={0.5} />
-        </mesh>
-      )}
-
-      {/* Point light */}
-      <pointLight color={node.color} intensity={selected ? 2.5 : 0.6} distance={4} />
-
-      {/* Label */}
-      <Text
-        position={[0, -0.7, 0]}
-        fontSize={0.16}
-        color={selected ? node.color : 'rgba(255,255,255,0.4)'}
-        anchorX="center" anchorY="top"
-      >
-        {node.label}
-      </Text>
-    </group>
-  )
+function agentKey(raw: string): string {
+  return raw?.toLowerCase().replace(/[\s']+/g, '_').replace(/[^a-z_]/g, '') ?? 'unknown'
 }
 
-function GraphEdges({ nodes }: { nodes: AgentNode[] }) {
-  const positions = useMemo(() => {
-    const pts: number[] = []
-    const cols: number[] = []
-    // Edges between consecutive nodes
-    for (let i = 0; i < nodes.length - 1; i++) {
-      const a = nodes[i], b = nodes[i + 1]
-      pts.push(...a.pos, ...b.pos)
-      const ca = new THREE.Color(a.color), cb = new THREE.Color(b.color)
-      const dim = 0.18
-      cols.push(ca.r * dim, ca.g * dim, ca.b * dim, cb.r * dim, cb.g * dim, cb.b * dim)
-    }
-    return { positions: new Float32Array(pts), colors: new Float32Array(cols) }
-  }, [nodes])
-
-  return (
-    <lineSegments>
-      <bufferGeometry>
-        <bufferAttribute attach="attributes-position" args={[positions.positions, 3]} />
-        <bufferAttribute attach="attributes-color"    args={[positions.colors, 3]} />
-      </bufferGeometry>
-      <lineBasicMaterial vertexColors transparent opacity={0.7} />
-    </lineSegments>
-  )
-}
-
-function CameraOrbit() {
-  const { camera } = useThree()
-  const autoAngle = useRef(0)
-
-  useFrame((_, delta) => {
-    autoAngle.current += delta * 0.06
-    const base = new THREE.Vector3(
-      Math.sin(autoAngle.current) * 12,
-      3,
-      Math.cos(autoAngle.current) * 12,
-    )
-    camera.position.lerp(base, 0.02)
-    camera.lookAt(0, 0, 0)
-  })
-
-  return null
-}
-
-function Scene3D({ nodes, selectedId, onSelect }: {
-  nodes: AgentNode[]
-  selectedId: string | null
-  onSelect: (id: string) => void
-}) {
-  return (
-    <>
-      <Stars radius={120} depth={60} count={5000} factor={5} saturation={0.1} fade speed={0.6} />
-      <ambientLight intensity={0.06} />
-      {nodes.map(n => (
-        <NodeSphere
-          key={n.id}
-          node={n}
-          selected={n.id === selectedId}
-          onClick={() => onSelect(n.id)}
-        />
-      ))}
-      <GraphEdges nodes={nodes} />
-      <fog attach="fog" args={['#000008', 18, 55]} />
-      <CameraOrbit />
-    </>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Main page
-// ─────────────────────────────────────────────────────────────────────────
+interface NodeData { key: string; label: string; icon: string; color: string; role: string; content: string }
 
 export default function ResultsPage() {
   const { id }  = useParams<{ id: string }>()
   const router  = useRouter()
 
-  const [result,    setResult]    = useState<{ run_id: string; entries: Entry[]; error?: string } | null>(null)
-  const [loading,   setLoading]   = useState(true)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [result,     setResult]     = useState<{ run_id: string; entries: Entry[]; error?: string } | null>(null)
+  const [loading,    setLoading]    = useState(true)
+  const [selected,   setSelected]   = useState<NodeData | null>(null)
   const [showReport, setShowReport] = useState(false)
 
-  // Fetch results
   useEffect(() => {
     let attempts = 0
     const poll = async () => {
@@ -215,36 +55,37 @@ export default function ResultsPage() {
     poll()
   }, [id])
 
-  // Build 3D nodes from entries
-  const nodes = useMemo<AgentNode[]>(() => {
+  const nodes = useMemo<NodeData[]>(() => {
     if (!result?.entries) return []
     const seen = new Map<string, string>()
     result.entries.forEach(e => {
-      const key = e.agent?.toLowerCase().replace(/[\s']+/g, '_').replace(/[^a-z_]/g, '') ?? 'unknown'
-      if (!seen.has(key) && e.content) seen.set(key, e.content)
+      const k = agentKey(e.agent)
+      if (!seen.has(k) && e.content && e.role !== 'task') seen.set(k, e.content)
     })
-    return Array.from(seen.entries()).map(([key, content], i) => ({
-      id: key,
-      label: AGENT_META[key]?.label ?? key.replace(/_/g, ' '),
-      color: AGENT_META[key]?.color ?? '#6366f1',
-      pos: POSITIONS[i % POSITIONS.length],
-      content,
-    }))
+    return Array.from(seen.entries()).map(([k, content]) => {
+      const m = AGENT_META[k]
+      return {
+        key:     k,
+        label:   m?.label ?? k.replace(/_/g, ' '),
+        icon:    m?.icon  ?? '◌',
+        color:   m?.color ?? '#666',
+        role:    m?.role  ?? '',
+        content,
+      }
+    })
   }, [result])
 
-  // Build markdown report
   const report = useMemo(() => {
     if (!result?.entries) return ''
     return result.entries
-      .filter(e => e.content && e.role !== 'meta' && e.role !== 'task')
+      .filter(e => e.content && !['task', 'dataset_context'].includes(e.role))
       .map(e => {
-        const label = AGENT_META[e.agent?.toLowerCase().replace(/[\s']+/g, '_') ?? '']?.label ?? e.agent
+        const m = AGENT_META[agentKey(e.agent)]
+        const label = m?.label ?? e.agent
         return `## ${label}\n\n${e.content}`
       })
       .join('\n\n---\n\n')
   }, [result])
-
-  const selectedNode = nodes.find(n => n.id === selectedId) ?? null
 
   const downloadReport = useCallback(() => {
     const blob = new Blob([report], { type: 'text/markdown' })
@@ -254,209 +95,234 @@ export default function ResultsPage() {
     URL.revokeObjectURL(url)
   }, [report, id])
 
-  // ── Loading ──────────────────────────────────────────────────────────
-  if (loading) {
-    return (
-      <div style={{ position: 'fixed', inset: 0, background: '#000008', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 36, marginBottom: 16, animation: 'float 2s ease-in-out infinite' }}>◈</div>
-          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: 'rgba(6,182,212,0.6)', letterSpacing: '0.3em' }}>
-            LOADING RESULTS…
-          </div>
-        </div>
+  // ── Loading ──────────────────────────────────────────────────────────────
+  if (loading) return (
+    <div style={{ minHeight: '100vh', background: '#0a0a0a', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ width: 40, height: 40, borderRadius: '50%', border: '2px solid rgba(230,48,48,0.2)', borderTopColor: '#e63030', margin: '0 auto 20px', animation: 'spin-slow 0.9s linear infinite' }} />
+        <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: 'rgba(255,255,255,0.25)', letterSpacing: '0.12em' }}>LOADING RESULTS</div>
       </div>
-    )
-  }
+    </div>
+  )
 
-  // ── Error ────────────────────────────────────────────────────────────
-  if (result?.error) {
-    return (
-      <div style={{ position: 'fixed', inset: 0, background: '#000008', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
-        <div className="holo-panel" style={{ padding: '2rem', maxWidth: 500 }}>
-          <div style={{ color: '#f87171', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: '0.2em', marginBottom: 12 }}>❌ PIPELINE ERROR</div>
-          <pre style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: 'rgba(255,255,255,0.4)', whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto' }}>
-            {result.error}
-          </pre>
-          <button onClick={() => router.push('/')} className="btn-ghost" style={{ width: '100%', marginTop: 16 }}>← HOME</button>
-        </div>
+  // ── Error ────────────────────────────────────────────────────────────────
+  if (result?.error) return (
+    <div style={{ minHeight: '100vh', background: '#0a0a0a', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
+      <div style={{ maxWidth: 480, width: '100%', background: '#111', border: '1px solid rgba(230,48,48,0.25)', borderRadius: 18, padding: '28px' }}>
+        <div style={{ fontSize: 13, color: '#f87171', fontWeight: 600, marginBottom: 12 }}>❌ Pipeline Error</div>
+        <pre style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.3)', whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto', fontFamily: "'JetBrains Mono',monospace" }}>{result.error}</pre>
+        <button className="btn-ghost" onClick={() => router.push('/')} style={{ marginTop: 16, width: '100%' }}>← Home</button>
       </div>
-    )
-  }
+    </div>
+  )
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: '#000008', overflow: 'hidden' }}>
+    <div style={{ minHeight: '100vh', background: 'transparent', display: 'flex', flexDirection: 'column' }}>
 
-      {/* 3D Graph */}
-      <CanvasSafe
-        camera={{ position: [0, 3, 14], fov: 52 }}
-        style={{ position: 'absolute', inset: 0 }}
-        dpr={[1, 1.5]}
-      >
-        <Scene3D nodes={nodes} selectedId={selectedId} onSelect={setSelectedId} />
-      </CanvasSafe>
 
-      {/* Deselect click */}
-      <div
-        style={{ position: 'absolute', inset: 0, zIndex: 1 }}
-        onClick={() => setSelectedId(null)}
-      />
-
-      {/* ── HUD ── */}
-      <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 10 }}>
-
-        {/* Top bar */}
-        <div style={{
-          position: 'absolute', top: 0, left: 0, right: 0, padding: '16px 24px',
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          background: 'linear-gradient(180deg, rgba(0,0,12,0.92) 0%, transparent 100%)',
-          pointerEvents: 'auto',
-        }}>
-          <button onClick={() => router.push('/')} className="hud-frame" style={{ cursor: 'pointer' }}>
-            ← HOME
-          </button>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: 'rgba(255,255,255,0.15)', letterSpacing: '0.25em' }}>
-              ANALYSIS RESULTS
-            </div>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 8.5, color: 'rgba(99,102,241,0.4)', letterSpacing: '0.2em', marginTop: 3 }}>
-              RUN // {id}
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={() => { setShowReport(true); setSelectedId(null) }} className="hud-frame" style={{ cursor: 'pointer' }}>
-              ◈ FULL REPORT
-            </button>
-            <button onClick={downloadReport} className="hud-frame" style={{ cursor: 'pointer' }}>
-              ↓ EXPORT .MD
-            </button>
-          </div>
+      {/* Nav */}
+      <nav style={{
+        position: 'sticky', top: 0, zIndex: 100,
+        padding: '16px 32px',
+        background: 'rgba(10,10,10,0.92)',
+        backdropFilter: 'blur(16px)',
+        borderBottom: '1px solid rgba(255,255,255,0.05)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{
+            width: 26, height: 26, borderRadius: 7,
+            background: 'linear-gradient(135deg, #e63030, #8b0000)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 11, color: '#fff',
+          }}>◆</div>
+          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 600, fontSize: 14 }}>DS Agent Team</span>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.2)', fontFamily: "'JetBrains Mono',monospace" }}>/ {id}</span>
         </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn-ghost" onClick={() => setShowReport(true)} style={{ fontSize: 12 }}>Full Report</button>
+          <button className="btn-outline" onClick={downloadReport} style={{ fontSize: 12 }}>↓ Export .md</button>
+          <button className="btn-ghost" onClick={() => router.push('/')} style={{ fontSize: 12 }}>← Home</button>
+        </div>
+      </nav>
 
-        {/* Node count */}
-        <div style={{
-          position: 'absolute', bottom: 24, left: 24,
-        }}>
-          <div className="hud-frame">
-            {nodes.length} AGENTS · CLICK NODE TO INSPECT
+      {/* Main content */}
+      <div style={{ flex: 1, padding: '40px 32px', maxWidth: 1200, margin: '0 auto', width: '100%', position: 'relative', zIndex: 10 }}>
+
+        {/* Header */}
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} style={{ marginBottom: 36 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+            <span style={{ color: '#34d399', fontSize: 18 }}>✓</span>
+            <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 26, letterSpacing: '-0.02em' }}>
+              Analysis Complete
+            </h1>
           </div>
+          <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 14 }}>
+            {nodes.length} agents completed their analysis. Click any card to read their full output.
+          </p>
+        </motion.div>
+
+        {/* Agent cards grid */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 14 }}>
+          {nodes.map((node, i) => (
+            <motion.div
+              key={node.key}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.05, duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+              onClick={() => setSelected(node)}
+              style={{
+                padding: '18px 20px',
+                borderRadius: 16,
+                background: '#111111',
+                border: `1px solid rgba(255,255,255,0.06)`,
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                position: 'relative',
+                overflow: 'hidden',
+              }}
+              whileHover={{
+                borderColor: `${node.color}44`,
+                backgroundColor: `${node.color}06`,
+                y: -2,
+              }}
+            >
+              {/* Top color bar */}
+              <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg, ${node.color}, transparent)` }} />
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                <div style={{
+                  width: 40, height: 40, borderRadius: 11,
+                  background: `${node.color}14`,
+                  border: `1px solid ${node.color}30`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 18, color: node.color,
+                }}>
+                  {node.icon}
+                </div>
+                <div>
+                  <div style={{ fontFamily: "'Inter',sans-serif", fontWeight: 600, fontSize: 14, color: 'rgba(255,255,255,0.85)' }}>{node.label}</div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)', marginTop: 1 }}>{node.role}</div>
+                </div>
+              </div>
+
+              <p style={{
+                fontSize: 12, color: 'rgba(255,255,255,0.3)', lineHeight: 1.6,
+                overflow: 'hidden', display: '-webkit-box',
+                WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+                fontFamily: "'Inter',sans-serif",
+              }}>
+                {node.content.replace(/#+\s/g, '').slice(0, 160)}…
+              </p>
+
+              <div style={{ marginTop: 14, display: 'flex', justifyContent: 'flex-end' }}>
+                <span style={{ fontSize: 11, color: node.color, fontFamily: "'Inter',sans-serif", fontWeight: 500 }}>Read output →</span>
+              </div>
+            </motion.div>
+          ))}
         </div>
       </div>
 
-      {/* ── Selected node detail panel ── */}
+      {/* ── Selected agent panel ── */}
       <AnimatePresence>
-        {selectedNode && !showReport && (
-          <motion.div
-            key={selectedNode.id}
-            initial={{ opacity: 0, x: 60 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 60 }}
-            transition={{ type: 'spring', damping: 26, stiffness: 260 }}
-            style={{
-              position: 'fixed', right: 0, top: 0, bottom: 0, zIndex: 15,
-              width: 'min(480px, 100vw)',
-              display: 'flex', flexDirection: 'column',
-              background: 'rgba(0,0,10,0.92)',
-              borderLeft: `1px solid ${selectedNode.color}33`,
-              backdropFilter: 'blur(32px)',
-            }}
-          >
-            {/* Panel top accent */}
-            <div style={{ height: 2, background: `linear-gradient(90deg, transparent, ${selectedNode.color}, transparent)` }} />
+        {selected && !showReport && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setSelected(null)}
+              style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 200, backdropFilter: 'blur(4px)' }}
+            />
+            {/* Drawer */}
+            <motion.div
+              initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+              style={{
+                position: 'fixed', right: 0, top: 0, bottom: 0, zIndex: 201,
+                width: 'min(560px, 100vw)',
+                background: '#0f0f0f',
+                borderLeft: `1px solid ${selected.color}30`,
+                display: 'flex', flexDirection: 'column',
+                boxShadow: `-20px 0 60px rgba(0,0,0,0.5)`,
+              }}
+            >
+              {/* Top accent */}
+              <div style={{ height: 2, background: `linear-gradient(90deg, ${selected.color}, ${selected.color}33)` }} />
 
-            {/* Header */}
-            <div style={{
-              padding: '20px 24px 16px',
-              borderBottom: `1px solid ${selectedNode.color}20`,
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 4 }}>
-                <div style={{
-                  width: 10, height: 10, borderRadius: '50%',
-                  background: selectedNode.color,
-                  boxShadow: `0 0 12px ${selectedNode.color}`,
-                }} />
-                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: selectedNode.color, letterSpacing: '0.3em' }}>
-                  AGENT OUTPUT
-                </span>
+              {/* Header */}
+              <div style={{ padding: '24px 28px 20px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 4 }}>
+                  <div style={{
+                    width: 48, height: 48, borderRadius: 14,
+                    background: `${selected.color}14`,
+                    border: `1px solid ${selected.color}33`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 22, color: selected.color,
+                  }}>
+                    {selected.icon}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, color: selected.color }}>{selected.label}</div>
+                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', marginTop: 2 }}>{selected.role}</div>
+                  </div>
+                  <button
+                    onClick={() => setSelected(null)}
+                    style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  >✕</button>
+                </div>
               </div>
-              <div style={{
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontSize: 20, fontWeight: 800, color: '#fff',
-                textShadow: `0 0 20px ${selectedNode.color}60`,
-              }}>
-                {selectedNode.label}
-              </div>
-            </div>
 
-            {/* Content */}
-            <div style={{ flex: 1, overflow: 'auto', padding: '16px 24px' }}>
-              <div className="report">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {selectedNode.content}
-                </ReactMarkdown>
+              {/* Content */}
+              <div style={{ flex: 1, overflow: 'auto', padding: '20px 28px' }}>
+                <div className="report">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{selected.content}</ReactMarkdown>
+                </div>
               </div>
-            </div>
-
-            {/* Close */}
-            <div style={{ padding: '14px 24px', borderTop: `1px solid ${selectedNode.color}15` }}>
-              <button
-                onClick={() => setSelectedId(null)}
-                className="btn-ghost"
-                style={{ width: '100%', borderColor: `${selectedNode.color}33`, color: selectedNode.color }}
-              >
-                ✕ CLOSE
-              </button>
-            </div>
-          </motion.div>
+            </motion.div>
+          </>
         )}
       </AnimatePresence>
 
-      {/* ── Full report panel ── */}
+      {/* ── Full report modal ── */}
       <AnimatePresence>
         {showReport && (
-          <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 40 }}
-            style={{
-              position: 'fixed', inset: 0, zIndex: 20,
-              background: 'rgba(0,0,8,0.97)',
-              backdropFilter: 'blur(32px)',
-              display: 'flex', flexDirection: 'column',
-            }}
-          >
-            {/* Header */}
-            <div style={{
-              padding: '18px 28px',
-              borderBottom: '1px solid rgba(99,102,241,0.15)',
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              background: 'linear-gradient(180deg, rgba(0,0,20,0.8) 0%, transparent 100%)',
-            }}>
-              <div>
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: 'rgba(6,182,212,0.5)', letterSpacing: '0.3em', marginBottom: 4 }}>
-                  FULL ANALYSIS REPORT
+          <>
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => setShowReport(false)}
+              style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 200, backdropFilter: 'blur(6px)' }}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.97, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.97 }}
+              transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+              style={{
+                position: 'fixed', inset: '5vh 5vw', zIndex: 201,
+                background: '#0f0f0f',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 20,
+                display: 'flex', flexDirection: 'column',
+                boxShadow: '0 40px 120px rgba(0,0,0,0.7)',
+              }}
+            >
+              <div style={{ padding: '22px 28px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18 }}>Full Analysis Report</div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', marginTop: 2, fontFamily: "'JetBrains Mono',monospace" }}>Run {id}</div>
                 </div>
-                <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 18, fontWeight: 700, color: '#fff' }}>
-                  Run {id}
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn-outline" onClick={downloadReport} style={{ fontSize: 12 }}>↓ Export</button>
+                  <button onClick={() => setShowReport(false)} style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: 10 }}>
-                <button onClick={downloadReport} className="btn-ghost" style={{ fontSize: 12 }}>↓ EXPORT</button>
-                <button onClick={() => setShowReport(false)} className="btn-ghost" style={{ fontSize: 12 }}>✕ CLOSE</button>
+              <div style={{ flex: 1, overflow: 'auto', padding: '24px 36px', maxWidth: 860, margin: '0 auto', width: '100%' }}>
+                <div className="report">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
+                </div>
               </div>
-            </div>
-
-            {/* Top accent line */}
-            <div style={{ height: 1, background: 'linear-gradient(90deg, transparent, rgba(99,102,241,0.5), rgba(6,182,212,0.5), transparent)' }} />
-
-            {/* Report body */}
-            <div style={{ flex: 1, overflow: 'auto', padding: '32px', maxWidth: 880, margin: '0 auto', width: '100%' }}>
-              <div className="report">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {report}
-                </ReactMarkdown>
-              </div>
-            </div>
-          </motion.div>
+            </motion.div>
+          </>
         )}
       </AnimatePresence>
     </div>
